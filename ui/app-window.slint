@@ -1,0 +1,564 @@
+import { Button, HorizontalBox, VerticalBox, Slider, ScrollView, LineEdit } from "std-widgets.slint";
+
+export struct Series {
+    name: string,
+    thumbnail: image,
+}
+
+export struct DiscoveredServer {
+    name: string,
+    address: string,
+}
+
+export struct PublicUser {
+    name: string,
+    id: string,
+    has_password: bool,
+    thumbnail: image,
+}
+
+export struct Episode {
+    title: string,
+    duration: string,
+}
+
+export struct TrackInfo {
+    id: int,
+    name: string,
+    active: bool,
+}
+
+export component TrackSelector inherits Rectangle {
+    in property <string> label;
+    in property <[TrackInfo]> tracks;
+    in property <string> current_name;
+    callback select_track(int);
+
+    width: 160px;
+    height: 35px;
+    background: #222;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: #444;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 5px;
+        Text { text: label; font-size: 14px; vertical-alignment: center; }
+        Text { 
+            text: current_name; 
+            color: white; 
+            font-size: 12px; 
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        Text { text: "▾"; color: #aaa; vertical-alignment: center; }
+    }
+
+    TouchArea {
+        clicked => { popup.show(); }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: -self.height - 5px; // Show above
+        width: root.width;
+
+        Rectangle {
+            background: #1a1a1a;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: #444;
+            
+            VerticalLayout {
+                padding: 5px;
+                for t[i] in root.tracks : Rectangle {
+                    height: 30px;
+                    background: item-touch.has-hover ? #333 : (t.active ? #2a2a2a : transparent);
+                    border-radius: 2px;
+                    
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        spacing: 10px;
+                        if (t.active) : Text { text: "✓"; color: #00ff00; vertical-alignment: center; }
+                        Text { 
+                            text: t.name; 
+                            color: white; 
+                            font-size: 12px; 
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    item-touch := TouchArea {
+                        clicked => {
+                            root.select_track(t.id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+export component PlayerWindow inherits Window {
+    title: "AMP - Advanced Media Player";
+    background: #0b0b0b;
+
+    // Callbacks
+    callback toggle_pause();
+    callback seek(float);
+    callback user_activity();
+    callback select_series(int);
+    callback select_episode(int);
+    callback back_to_series();
+    callback login(string, string, string);
+    callback discover_servers();
+    callback get_public_users(string);
+    callback select_audio_track(int);
+    callback select_subtitle_track(int);
+
+    // Global State
+    in-out property <string> current_screen: "login";
+    in property <string> error_message: "";
+    in property <bool> is_loading: false;
+    in property <bool> is_loading_discovery: false;
+
+    // Library Data
+    in property <[Series]> series_list: [];
+    in property <[DiscoveredServer]> discovered_servers: [];
+    in-out property <[PublicUser]> public_users: [];
+    in property <[Episode]> episode_list: [];
+    in property <string> selected_series_name: "";
+    in property <string> selected_server: "";
+
+    // Player Properties
+    in property <image> video_frame;
+    in property <bool> is_paused: false;
+    in property <float> progress: 0.0;
+    in property <string> time_pos: "00:00";
+    in property <string> duration: "00:00";
+    in property <bool> controls_visible: true;
+    
+    in property <[TrackInfo]> audio_tracks: [];
+    in property <[TrackInfo]> subtitle_tracks: [];
+    in property <string> audio_track_name: "Default";
+    in property <string> subtitle_track_name: "None";
+
+    // Sizes exported to Rust
+    out property <length> video_width: video_area.width;
+    out property <length> video_height: video_area.height;
+
+    // --- 0. LOGIN SCREEN ---
+    if (root.current_screen == "login") : VerticalLayout {
+        alignment: center;
+        spacing: 15px;
+        padding: 20px;
+
+        Text {
+            text: "AMP - Login to Jellyfin";
+            font-size: 32px;
+            font-weight: 700;
+            color: white;
+            horizontal-alignment: center;
+        }
+
+        Rectangle {
+            background: #1a1a1a;
+            border-radius: 12px;
+            width: 400px;
+            height: root.public_users.length > 0 ? 580px : 480px;
+            
+            VerticalLayout {
+                padding: 30px;
+                spacing: 20px;
+
+                if (root.public_users.length == 0) : VerticalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        spacing: 5px;
+                        HorizontalLayout {
+                            alignment: space-between;
+                            Text { text: "Server URL"; color: #aaa; font-size: 14px; vertical-alignment: center; }
+                            Button { 
+                                text: root.is_loading_discovery ? "Loading..." : "Discover";
+                                enabled: !root.is_loading_discovery; 
+                                clicked => { root.discover_servers(); }
+                            }
+                        }
+                        url_input := LineEdit { 
+                            text: root.selected_server == "" ? "http://localhost:8096" : root.selected_server;
+                            placeholder-text: "http://192.168.1.10:8096";
+                        }
+
+                        if (root.discovered_servers.length > 0) : VerticalLayout {
+                            spacing: 5px;
+                            Text { text: "Found Servers:"; color: #aaa; font-size: 12px; }
+                            for server in root.discovered_servers : Rectangle {
+                                height: 30px;
+                                background: #2a2a2a;
+                                border-radius: 4px;
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    alignment: space-between;
+                                    Text { text: server.name; vertical-alignment: center; }
+                                    Text { text: server.address; color: #888; font-size: 12px; vertical-alignment: center; }
+                                }
+                                TouchArea {
+                                    clicked => { 
+                                        url_input.text = server.address;
+                                        root.get_public_users(server.address);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Button {
+                        text: "Continue";
+                        primary: true;
+                        clicked => {
+                            root.get_public_users(url_input.text);
+                        }
+                    }
+                }
+
+                if (root.public_users.length > 0) : VerticalLayout {
+                    spacing: 20px;
+                    HorizontalLayout {
+                        alignment: space-between;
+                        Text { text: "Select User"; color: #aaa; font-size: 14px; }
+                        Button {
+                            text: "Change Server";
+                            clicked => { 
+                                // Reset users to go back
+                                root.public_users = [];
+                            }
+                        }
+                    }
+
+                    ScrollView {
+                        height: 150px;
+                        VerticalLayout {
+                            spacing: 10px;
+                            for user in root.public_users : Rectangle {
+                                height: 50px;
+                                background: #2a2a2a;
+                                border-radius: 8px;
+                                HorizontalLayout {
+                                    padding: 5px;
+                                    spacing: 10px;
+                                    Image {
+                                        source: user.thumbnail;
+                                        width: 40px;
+                                        height: 40px;
+                                        image-fit: contain;
+                                    }
+                                    Text {
+                                        text: user.name;
+                                        vertical-alignment: center;
+                                        color: white;
+                                    }
+                                }
+                                TouchArea {
+                                    clicked => {
+                                        user_input.text = user.name;
+                                        if (!user.has_password) {
+                                            root.login(root.selected_server, user.name, "");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    VerticalLayout {
+                        spacing: 5px;
+                        Text { text: "Username"; color: #aaa; font-size: 14px; }
+                        user_input := LineEdit { placeholder-text: "jellyfin_user"; }
+                    }
+
+                    VerticalLayout {
+                        spacing: 5px;
+                        Text { text: "Password"; color: #aaa; font-size: 14px; }
+                        pass_input := LineEdit { 
+                            placeholder-text: "••••••••";
+                            input-type: password;
+                        }
+                    }
+
+                    if (root.error_message != "") : Text {
+                        text: root.error_message;
+                        color: #ff4444;
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                    }
+
+                    Button {
+                        text: root.is_loading ? "Connecting..." : "Connect";
+                        enabled: !root.is_loading;
+                        primary: true;
+                        clicked => {
+                            root.login(root.selected_server, user_input.text, pass_input.text);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- 1. SERIES PICKER SCREEN ---
+    if (root.current_screen == "series") : VerticalLayout {
+        padding: 40px;
+        spacing: 20px;
+
+        Text {
+            text: "Your Library";
+            font-size: 32px;
+            font-weight: 700;
+            color: white;
+        }
+
+        ScrollView {
+            VerticalLayout {
+                spacing: 20px;
+                HorizontalLayout {
+                    spacing: 20px;
+                    alignment: start;
+                    for s[i] in root.series_list : Rectangle {
+                        width: 200px;
+                        height: 300px;
+                        background: #1a1a1a;
+                        border-radius: 8px;
+                        clip: true;
+
+                        VerticalLayout {
+                            Rectangle {
+                                background: #2a2a2a;
+                                height: 240px;
+                                Image {
+                                    source: s.thumbnail;
+                                    width: 100%;
+                                    height: 100%;
+                                    image-fit: contain;
+                                }
+                            }
+                            
+                            Rectangle {
+                                Text {
+                                    padding: 10px;
+                                    text: s.name;
+                                    color: white;
+                                    font-size: 16px;
+                                    font-weight: 500;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => { root.select_series(i); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- 2. EPISODE PICKER SCREEN ---
+    if (root.current_screen == "episodes") : VerticalLayout {
+        padding: 40px;
+        spacing: 20px;
+
+        HorizontalLayout {
+            spacing: 20px;
+            alignment: start;
+            
+            Button {
+                text: "← Back";
+                clicked => { root.back_to_series(); }
+            }
+
+            Text {
+                text: root.selected_series_name;
+                font-size: 32px;
+                font-weight: 700;
+                color: white;
+            }
+        }
+
+        ScrollView {
+            VerticalLayout {
+                spacing: 10px;
+                for ep[i] in root.episode_list : Rectangle {
+                    height: 60px;
+                    background: ep_touch.has-hover ? #222 : #1a1a1a;
+                    border-radius: 4px;
+                    animate background { duration: 150ms; }
+
+                    HorizontalLayout {
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        spacing: 20px;
+
+                        Text {
+                            text: (i + 1) + ". " + ep.title;
+                            color: white;
+                            font-size: 18px;
+                            vertical-alignment: center;
+                        }
+
+                        Rectangle {} // Spacer
+
+                        Text {
+                            text: ep.duration;
+                            color: #aaa;
+                            font-size: 14px;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    ep_touch := TouchArea {
+                        clicked => { root.select_episode(i); }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- 3. PLAYER SCREEN ---
+    video_area := Rectangle {
+        visible: root.current_screen == "player";
+        width: 100%;
+        height: 100%;
+        background: black;
+
+        Image {
+            source: root.video_frame;
+            width: 100%;
+            height: 100%;
+            image-fit: contain;
+        }
+
+        TouchArea {
+            pointer-event(ev) => {
+                if (ev.kind == PointerEventKind.move) {
+                    root.user_activity();
+                }
+            }
+            clicked => { root.user_activity(); }
+        }
+
+        // Top Navigation (Back Button)
+        VerticalLayout {
+            alignment: start;
+            padding: 20px;
+            opacity: root.controls_visible ? 1.0 : 0.0;
+            animate opacity { duration: 250ms; }
+
+            HorizontalLayout {
+                Button {
+                    text: "← Library";
+                    clicked => { root.current_screen = "episodes"; }
+                }
+            }
+        }
+
+        // Overlay Controls
+        VerticalLayout {
+            alignment: end;
+            
+            Rectangle {
+                height: 160px;
+                background: #00000088;
+                opacity: root.controls_visible ? 1.0 : 0.0;
+                animate opacity { duration: 250ms; }
+                
+                TouchArea {
+                    pointer-event(ev) => { root.user_activity(); }
+                    clicked => { root.user_activity(); }
+                }
+
+                VerticalLayout {
+                    padding-left: 30px;
+                    padding-right: 30px;
+                    padding-bottom: 20px;
+                    spacing: 10px;
+
+                    Slider {
+                        minimum: 0.0;
+                        maximum: 100.0;
+                        value: root.progress;
+                        changed(val) => { 
+                            root.user_activity();
+                            root.seek(val); 
+                        }
+                    }
+
+                    HorizontalLayout {
+                        spacing: 20px;
+                        alignment: center;
+
+                        // Audio Track Selector
+                        TrackSelector {
+                            label: "🔊";
+                            current_name: root.audio_track_name;
+                            tracks: root.audio_tracks;
+                            select_track(id) => { root.select_audio_track(id); }
+                        }
+
+                        // Time Display
+                        Text {
+                            text: root.time_pos;
+                            color: white;
+                            vertical-alignment: center;
+                            font-size: 16px;
+                            font-weight: 500;
+                        }
+
+                        // Play/Pause Button
+                        Rectangle {
+                            width: 50px;
+                            height: 50px;
+                            border-radius: 25px;
+                            background: touch-area.pressed ? #555 : (touch-area.has-hover ? #444 : #333);
+                            animate background { duration: 150ms; }
+                            
+                            Text {
+                                text: root.is_paused ? "▶" : "⏸";
+                                color: white;
+                                font-size: 24px;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+
+                            touch-area := TouchArea {
+                                clicked => { 
+                                    root.user_activity();
+                                    root.toggle_pause(); 
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: root.duration;
+                            color: #ccc;
+                            vertical-alignment: center;
+                            font-size: 16px;
+                            font-weight: 500;
+                        }
+
+                        // Subtitle Track Selector
+                        TrackSelector {
+                            label: "💬";
+                            current_name: root.subtitle_track_name;
+                            tracks: root.subtitle_tracks;
+                            select_track(id) => { root.select_subtitle_track(id); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
