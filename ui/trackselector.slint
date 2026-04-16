@@ -1,0 +1,78 @@
+export struct TrackInfo {
+    id: int,
+    name: string,
+    active: bool,
+}
+
+export component TrackSelector inherits Rectangle {
+    in property <string> label;
+    in property <[TrackInfo]> tracks;
+    in property <string> current_name;
+    callback select_track(int);
+
+    width: 160px;
+    height: 35px;
+    background: #222;
+    border-radius: 4px;
+    border-width: 1px;
+    border-color: #444;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 5px;
+        Text { text: label; font-size: 14px; vertical-alignment: center; }
+        Text { 
+            text: current_name; 
+            color: white; 
+            font-size: 12px; 
+            overflow: elide;
+            vertical-alignment: center;
+        }
+        Text { text: "▾"; color: #aaa; vertical-alignment: center; }
+    }
+
+    TouchArea {
+        clicked => { popup.show(); }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: -self.height - 5px; // Show above
+        width: root.width;
+
+        Rectangle {
+            background: #1a1a1a;
+            border-radius: 4px;
+            border-width: 1px;
+            border-color: #444;
+            
+            VerticalLayout {
+                padding: 5px;
+                for t[i] in root.tracks : Rectangle {
+                    height: 30px;
+                    background: item-touch.has-hover ? #333 : (t.active ? #2a2a2a : transparent);
+                    border-radius: 2px;
+                    
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        spacing: 10px;
+                        if (t.active) : Text { text: "✓"; color: #00ff00; vertical-alignment: center; }
+                        Text { 
+                            text: t.name; 
+                            color: white; 
+                            font-size: 12px; 
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    item-touch := TouchArea {
+                        clicked => {
+                            root.select_track(t.id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

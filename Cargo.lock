@@ -74,10 +74,13 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 name = "amp"
 version = "0.1.0"
 dependencies = [
+ "amp-api",
+ "async-trait",
  "directories",
  "futures",
  "image",
  "libc",
+ "libloading",
  "libmpv-sys",
  "reqwest",
  "serde",
@@ -85,6 +88,17 @@ dependencies = [
  "slint",
  "slint-build",
  "tokio",
+]
+
+[[package]]
+name = "amp-api"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "directories",
+ "serde",
+ "serde_json",
+ "slint",
 ]
 
 [[package]]

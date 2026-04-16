@@ -16,6 +16,9 @@ image = "0.25"
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 directories = "6.0.0"
+async-trait = "0.1"
+libloading = "0.8"
+amp-api = { path = "./amp-api" }
 
 [build-dependencies]
 slint-build = "1.14.1"
