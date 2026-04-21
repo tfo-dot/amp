@@ -1,11 +1,11 @@
-use amp_api::MediaProviderFactory;
+use amp_api::{AmpPlugin, PluginCapability};
 use libloading::{Library, Symbol};
 use std::collections::HashMap;
 use std::error::Error;
 use std::sync::Arc;
 
 pub struct PluginManager {
-    factories: HashMap<String, Arc<dyn MediaProviderFactory>>,
+    plugins: HashMap<String, Arc<dyn AmpPlugin>>,
     #[allow(dead_code)]
     libraries: Vec<Library>, // Keep libraries in memory
 }
@@ -13,36 +13,38 @@ pub struct PluginManager {
 impl PluginManager {
     pub fn new() -> Self {
         Self {
-            factories: HashMap::new(),
+            plugins: HashMap::new(),
             libraries: Vec::new(),
         }
     }
 
-    pub fn register_builtin(&mut self, factory: Arc<dyn MediaProviderFactory>) {
-        self.factories.insert(factory.id().to_string(), factory);
+    pub fn register_builtin_plugin(&mut self, plugin: Arc<dyn AmpPlugin>) {
+        self.plugins.insert(plugin.id().to_string(), plugin);
     }
 
     pub unsafe fn load_plugin<P: AsRef<std::ffi::OsStr>>(&mut self, path: P) -> Result<(), Box<dyn Error>> {
         let lib = Library::new(path)?;
         
-        // Plugins should export a function: pub extern "C" fn get_factory() -> *mut dyn MediaProviderFactory
-        let constructor: Symbol<unsafe extern "C" fn() -> *mut dyn MediaProviderFactory> = 
-            lib.get(b"get_factory\0")?;
-        
-        let factory_ptr = constructor();
-        let factory = Arc::from_raw(factory_ptr);
-        
-        self.factories.insert(factory.id().to_string(), factory);
-        self.libraries.push(lib);
-        
-        Ok(())
+        if let Ok(init) = lib.get::<Symbol<unsafe extern "C" fn() -> *mut dyn AmpPlugin>>(b"get_plugin\0") {
+            let plugin_ptr = init();
+            let plugin = Arc::from_raw(plugin_ptr);
+            self.plugins.insert(plugin.id().to_string(), plugin);
+            self.libraries.push(lib);
+            Ok(())
+        } else {
+            Err("Plugin does not export get_plugin symbol".into())
+        }
     }
 
-    pub fn get_factories(&self) -> Vec<Arc<dyn MediaProviderFactory>> {
-        self.factories.values().cloned().collect()
+    pub fn with_capability(&self, capability: PluginCapability) -> Vec<Arc<dyn AmpPlugin>> {
+        self.plugins
+            .values()
+            .filter(|p| p.capabilities().contains(&capability))
+            .cloned()
+            .collect()
     }
 
-    pub fn get_factory(&self, id: &str) -> Option<Arc<dyn MediaProviderFactory>> {
-        self.factories.get(id).cloned()
+    pub fn get_plugin(&self, id: &str) -> Option<Arc<dyn AmpPlugin>> {
+        self.plugins.get(id).cloned()
     }
 }
