@@ -1,7 +1,3 @@
-# Plugin Development Guide
-
-This guide explains how to create new plugins for the AMP.
-
 ## Project Setup
 
 AMP plugins are Rust dynamic libraries (`.so` on Linux, `.dll` on Windows). Create a new library project:
@@ -30,7 +26,7 @@ amp-api = { path = "../amp-api" }
 
 ## Implementing the Traits
 
-You must implement the `AmpPlugin` trait, and depending on your plugin's purpose, the `MediaProvider` and/or `PlaybackExtension` traits.
+You must implement the `AmpPlugin` trait, and depending on your plugin's purpose, one or more of the capability traits: `MediaProvider`, `PlaybackExtension`, or `LibraryManager`.
 
 ### The Unified Plugin Trait (`AmpPlugin`)
 
@@ -39,9 +35,8 @@ This trait is the entry point for your plugin. It describes what your plugin can
 ```rust
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::error::Error;
 use std::sync::Arc;
-use amp_api::{AmpPlugin, PluginCapability, DynProvider, ConfigField, PlaybackExtension};
+use amp_api::{AmpPlugin, PluginCapability, DynProvider, ConfigField, PlaybackExtension, AmpError};
 
 pub struct MyPlugin;
 
@@ -55,7 +50,7 @@ impl AmpPlugin for MyPlugin {
         vec![PluginCapability::MediaProvider]
     }
 
-    // Only needed if you have MediaProvider capability
+    // Config fields for MediaProvider
     fn config_fields(&self) -> Vec<ConfigField> {
         vec![
             ConfigField {
@@ -67,21 +62,35 @@ impl AmpPlugin for MyPlugin {
         ]
     }
 
-    async fn create_provider(&self, config: HashMap<String, String>) -> Result<DynProvider, Box<dyn Error + Send + Sync>> {
-        Ok(Arc::new(MyProvider { ... }))
+    async fn create_provider(&self, config: HashMap<String, String>) -> Result<DynProvider, AmpError> {
+        Ok(Arc::new(MyProvider::new(config)))
     }
 }
 ```
 
+### MediaProvider Trait
+
+Implement this to provide content (movies, shows, etc.). Key methods include:
+- `get_root()`: Return the top-level categories.
+- `get_children(parent_id)`: Return items within a folder.
+- `get_stream_url(item_id)`: Return a URL that MPV can play.
+- `report_playback_progress(...)`: Sync watch status back to your server.
+
+### PlaybackExtension Trait
+
+Implement this to react to what the user is watching.
+- `on_playback_update(info)`: Called whenever playback state changes.
+- `on_playback_stop()`: Called when playback ends.
+
 ## Exporting the Plugin
 
-To allow AMP to load your plugin at runtime, you must export the `get_plugin` function:
+To allow AMP to load your plugin at runtime, you must export the `get_plugin` function. **Crucially**, it must return a raw pointer from an `Arc` to ensure correct memory management across the FFI boundary.
 
 ```rust
 #[no_mangle]
 pub extern "C" fn get_plugin() -> *mut dyn AmpPlugin {
-    let plugin = MyPlugin;
-    Box::into_raw(Box::new(plugin))
+    let plugin: Arc<dyn AmpPlugin> = Arc::new(MyPlugin);
+    Arc::into_raw(plugin) as *mut dyn AmpPlugin
 }
 ```
 
@@ -91,5 +100,7 @@ pub extern "C" fn get_plugin() -> *mut dyn AmpPlugin {
    ```bash
    cargo build --release
    ```
-2. **Copy**: Copy the resulting shared library to the AMP `plugins/` directory.
+2. **Copy**: Create a `plugins` directory in your AMP config folder and copy the resulting shared library (`.so` or `.dll`) there.
+   - **Linux**: `~/.config/amp/plugins/`
+   - **Windows**: `%AppData%\amp\plugins\`
 3. **Run**: Launch AMP. Your plugin will be loaded automatically.
