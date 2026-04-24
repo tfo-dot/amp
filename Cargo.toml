@@ -19,7 +19,9 @@ tokio = { version = "1", features = ["full"] }
 directories = "6.0.0"
 async-trait = "0.1"
 libloading = "0.8"
+urlencoding = "2.1"
 discord-rich-presence = "1.1.0"
+thiserror = "1.0"
 amp-api = { path = "./amp-api" }
 
 [build-dependencies]

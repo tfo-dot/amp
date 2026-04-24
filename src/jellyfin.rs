@@ -1,4 +1,7 @@
-use amp_api::{AmpPlugin, ConfigField, MediaItem, MediaProvider, PluginCapability, RawImage};
+use amp_api::{
+    AmpError, AmpPlugin, ConfigField, LibraryManager, MediaItem, MediaProvider, PlaybackExtension,
+    PluginCapability, RawImage,
+};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -82,7 +85,7 @@ impl JellyfinClient {
         url: String,
         user: String,
         pass: String,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Self, AmpError> {
         let client = reqwest::Client::new();
         let auth_url = format!("{}/Users/AuthenticateByName", url);
 
@@ -101,14 +104,22 @@ impl JellyfinClient {
             )
             .json(&body)
             .send()
-            .await?
+            .await
+            .map_err(|e| AmpError::Network(e.to_string()))?;
+
+        if !resp.status().is_success() {
+            return Err(AmpError::Auth(format!("Authentication failed with status: {}", resp.status())));
+        }
+
+        let auth_resp = resp
             .json::<AuthenticateResponse>()
-            .await?;
+            .await
+            .map_err(AmpError::from)?;
 
         Ok(Self {
             url: url.clone(),
-            api_key: resp.access_token.clone(),
-            user_id: resp.user.id,
+            api_key: auth_resp.access_token.clone(),
+            user_id: auth_resp.user.id,
             client,
         })
     }
@@ -116,7 +127,7 @@ impl JellyfinClient {
     pub async fn get_items_internal(
         &self,
         parent_id: Option<&str>,
-    ) -> Result<Vec<JellyfinItem>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Vec<JellyfinItem>, AmpError> {
         let url = if let Some(pid) = parent_id {
             format!(
                 "{}/Items?ParentId={}&Fields=PrimaryImageAspectRatio,UserData",
@@ -131,39 +142,41 @@ impl JellyfinClient {
             .get(url)
             .header("X-Emby-Authorization", self.get_auth_header())
             .send()
-            .await?
+            .await
+            .map_err(|e| AmpError::Network(e.to_string()))?
             .text()
-            .await?;
+            .await
+            .map_err(|e| AmpError::Network(e.to_string()))?;
 
         match serde_json::from_str::<JellyfinItemsResponse>(&resp_text) {
             Ok(resp) => Ok(resp.items),
             Err(e) => {
                 eprintln!("[Jellyfin] Failed to decode items response: {}", e);
-                eprintln!("[Jellyfin] Response text: {}", resp_text);
-                Err(e.into())
+                Err(AmpError::Serialization(e))
             }
         }
     }
 
     pub async fn get_next_up_internal(
         &self,
-    ) -> Result<Vec<JellyfinItem>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Vec<JellyfinItem>, AmpError> {
         let url = format!("{}/Shows/NextUp?UserId={}", self.url, self.user_id);
         let resp_text = self
             .client
             .get(url)
             .header("X-Emby-Authorization", self.get_auth_header())
             .send()
-            .await?
+            .await
+            .map_err(|e| AmpError::Network(e.to_string()))?
             .text()
-            .await?;
+            .await
+            .map_err(|e| AmpError::Network(e.to_string()))?;
 
         match serde_json::from_str::<JellyfinItemsResponse>(&resp_text) {
             Ok(resp) => Ok(resp.items),
             Err(e) => {
                 eprintln!("[Jellyfin] Failed to decode next up response: {}", e);
-                eprintln!("[Jellyfin] Response text: {}", resp_text);
-                Err(e.into())
+                Err(AmpError::Serialization(e))
             }
         }
     }
@@ -176,7 +189,7 @@ impl JellyfinClient {
     }
 
     fn get_auth_header(&self) -> String {
-        format!("{}, Token=\"{}\"", Self::get_header(), self.api_key)
+        format!("{}, Token=\"{}\", UserId=\"{}\"", Self::get_header(), self.api_key, self.user_id)
     }
 
     fn get_header() -> String {
@@ -189,11 +202,11 @@ impl JellyfinClient {
     pub async fn get_item_image_buffer_internal(
         &self,
         item_id: &str,
-    ) -> Result<RawImage, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<RawImage, AmpError> {
         let url = format!("{}/Items/{}/Images/Primary", self.url, item_id);
-        let resp = self.client.get(url).send().await?;
-        let bytes = resp.bytes().await?;
-        let img = image::load_from_memory(&bytes)?;
+        let resp = self.client.get(url).send().await.map_err(|e| AmpError::Network(e.to_string()))?;
+        let bytes = resp.bytes().await.map_err(|e| AmpError::Network(e.to_string()))?;
+        let img = image::load_from_memory(&bytes).map_err(|e| AmpError::Provider(format!("Image decode error: {}", e)))?;
         let rgba = img.to_rgba8();
         Ok(RawImage {
             width: rgba.width(),
@@ -227,7 +240,7 @@ impl JellyfinClient {
 
 #[async_trait]
 impl MediaProvider for JellyfinClient {
-    async fn get_root(&self) -> Result<Vec<MediaItem>, Box<dyn std::error::Error + Send + Sync>> {
+    async fn get_root(&self) -> Result<Vec<MediaItem>, AmpError> {
         let items = self.get_items_internal(None).await?;
         Ok(items.into_iter().map(Self::map_item).collect())
     }
@@ -235,16 +248,41 @@ impl MediaProvider for JellyfinClient {
     async fn get_children(
         &self,
         parent_id: &str,
-    ) -> Result<Vec<MediaItem>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Vec<MediaItem>, AmpError> {
         let items = self.get_items_internal(Some(parent_id)).await?;
         Ok(items.into_iter().map(Self::map_item).collect())
     }
 
     async fn get_next_up(
         &self,
-    ) -> Result<Vec<MediaItem>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Vec<MediaItem>, AmpError> {
         let items = self.get_next_up_internal().await?;
         Ok(items.into_iter().map(Self::map_item).collect())
+    }
+
+    async fn search(
+        &self,
+        query: &str,
+    ) -> Result<Vec<MediaItem>, AmpError> {
+        let url = format!("{}/Users/{}/Items?searchTerm={}&Recursive=true&IncludeItemTypes=Series", self.url, self.user_id, urlencoding::encode(query));
+        let resp_text = self
+            .client
+            .get(url)
+            .header("X-Emby-Authorization", self.get_auth_header())
+            .send()
+            .await
+            .map_err(|e| AmpError::Network(e.to_string()))?
+            .text()
+            .await
+            .map_err(|e| AmpError::Network(e.to_string()))?;
+
+        match serde_json::from_str::<JellyfinItemsResponse>(&resp_text) {
+            Ok(resp) => Ok(resp.items.into_iter().map(Self::map_item).collect()),
+            Err(e) => {
+                eprintln!("[Jellyfin] Failed to decode search response: {}", e);
+                Err(AmpError::Serialization(e))
+            }
+        }
     }
 
     fn get_stream_url(&self, item_id: &str) -> String {
@@ -254,7 +292,7 @@ impl MediaProvider for JellyfinClient {
     async fn get_item_image_buffer(
         &self,
         item_id: &str,
-    ) -> Result<RawImage, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<RawImage, AmpError> {
         self.get_item_image_buffer_internal(item_id).await
     }
 
@@ -269,18 +307,31 @@ impl MediaProvider for JellyfinClient {
     async fn get_resume_position(
         &self,
         item_id: &str,
-    ) -> Result<Option<i64>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<Option<i64>, AmpError> {
         let url = format!("{}/Users/{}/Items/{}", self.url, self.user_id, item_id);
         let resp = self
             .client
             .get(url)
             .header("X-Emby-Authorization", self.get_auth_header())
             .send()
-            .await?
-            .json::<JellyfinItem>()
-            .await?;
+            .await
+            .map_err(|e| AmpError::Network(e.to_string()))?;
 
-        Ok(resp
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_text: String = resp.text().await.unwrap_or_default();
+
+            eprintln!(
+                "[Jellyfin] Getting resume position failed: {} - {}",
+                status, err_text
+            );
+
+            return Err(AmpError::Provider(format!("Failed to get resume position: {}", status)));
+        }
+
+        let item = resp.json::<JellyfinItem>().await.map_err(AmpError::from)?;
+
+        Ok(item
             .user_data
             .map(|ud| ud.playback_position_ticks / 10_000_000))
     }
@@ -288,7 +339,7 @@ impl MediaProvider for JellyfinClient {
     async fn report_playback_start(
         &self,
         item_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), AmpError> {
         let url = format!("{}/Sessions/Playing", self.url);
         let body = serde_json::json!({
             "ItemId": item_id,
@@ -301,7 +352,8 @@ impl MediaProvider for JellyfinClient {
             .header("X-Emby-Authorization", self.get_auth_header())
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|e| AmpError::Network(e.to_string()))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -316,7 +368,7 @@ impl MediaProvider for JellyfinClient {
         item_id: &str,
         position_secs: i64,
         is_paused: bool,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), AmpError> {
         let url = format!("{}/Sessions/Playing/Progress", self.url);
         let body = serde_json::json!({
             "ItemId": item_id,
@@ -330,15 +382,18 @@ impl MediaProvider for JellyfinClient {
             .header("X-Emby-Authorization", self.get_auth_header())
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|e| AmpError::Network(e.to_string()))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
+        let status = resp.status();
+        if !status.is_success() {
             let err_text = resp.text().await.unwrap_or_default();
             eprintln!(
                 "[Jellyfin] Progress report failed: {} - {}",
                 status, err_text
             );
+        } else {
+            eprintln!("[Jellyfin] Progress report success: {}", status);
         }
         Ok(())
     }
@@ -347,7 +402,7 @@ impl MediaProvider for JellyfinClient {
         &self,
         item_id: &str,
         position_secs: i64,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), AmpError> {
         let url = format!("{}/Sessions/Playing/Stopped", self.url);
         let body = serde_json::json!({
             "ItemId": item_id,
@@ -360,7 +415,8 @@ impl MediaProvider for JellyfinClient {
             .header("X-Emby-Authorization", self.get_auth_header())
             .json(&body)
             .send()
-            .await?;
+            .await
+            .map_err(|e| AmpError::Network(e.to_string()))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -377,7 +433,7 @@ impl MediaProvider for JellyfinClient {
         &self,
         item_id: &str,
         played: bool,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), AmpError> {
         let url = if played {
             format!(
                 "{}/Users/{}/PlayedItems/{}",
@@ -396,14 +452,16 @@ impl MediaProvider for JellyfinClient {
                 .post(url)
                 .header("X-Emby-Authorization", self.get_auth_header())
                 .send()
-                .await?;
+                .await
+                .map_err(|e| AmpError::Network(e.to_string()))?;
         } else {
             let _ = self
                 .client
                 .delete(url)
                 .header("X-Emby-Authorization", self.get_auth_header())
                 .send()
-                .await?;
+                .await
+                .map_err(|e| AmpError::Network(e.to_string()))?;
         }
         Ok(())
     }
@@ -449,13 +507,13 @@ impl AmpPlugin for JellyfinFactory {
     async fn create_provider(
         &self,
         config: HashMap<String, String>,
-    ) -> Result<amp_api::DynProvider, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<amp_api::DynProvider, AmpError> {
         if let Some(api_key) = config.get("api_key") {
-            let url = config.get("url").cloned().ok_or("Missing url in cache")?;
+            let url = config.get("url").cloned().ok_or_else(|| AmpError::Plugin("Missing url in cache".into()))?;
             let user_id = config
                 .get("user_id")
                 .cloned()
-                .ok_or("Missing user_id in cache")?;
+                .ok_or_else(|| AmpError::Plugin("Missing user_id in cache".into()))?;
 
             return Ok(Arc::new(JellyfinClient {
                 url,
@@ -465,11 +523,29 @@ impl AmpPlugin for JellyfinFactory {
             }));
         }
 
-        let url = config.get("url").cloned().ok_or("Missing url")?;
-        let username = config.get("username").cloned().ok_or("Missing username")?;
-        let password = config.get("password").cloned().ok_or("Missing password")?;
+        let url = config.get("url").cloned().ok_or_else(|| AmpError::Plugin("Missing url".into()))?;
+        let username = config.get("username").cloned().ok_or_else(|| AmpError::Plugin("Missing username".into()))?;
+        let password = config.get("password").cloned().ok_or_else(|| AmpError::Plugin("Missing password".into()))?;
 
         let client = JellyfinClient::authenticate(url, username, password).await?;
         Ok(Arc::new(client))
+    }
+
+    fn extension_config_fields(&self) -> Vec<ConfigField> {
+        vec![]
+    }
+
+    async fn create_extension(
+        &self,
+        _config: HashMap<String, String>,
+    ) -> Result<Arc<dyn PlaybackExtension>, AmpError> {
+        Err(AmpError::Plugin("Not implemented".into()))
+    }
+
+    async fn create_library_manager(
+        &self,
+        _config: HashMap<String, String>,
+    ) -> Result<Arc<dyn LibraryManager>, AmpError> {
+        Err(AmpError::Plugin("Not implemented".into()))
     }
 }

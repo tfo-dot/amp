@@ -1,7 +1,9 @@
+use amp_api::{AmpPlugin, PlaybackExtension, PlaybackInfo, PluginCapability, AmpError};
+use async_trait::async_trait;
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use amp_api::{PlaybackExtension, AmpPlugin, PluginCapability, PlaybackInfo};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct DiscordRPC {
     client: Arc<Mutex<Option<DiscordIpcClient>>>,
@@ -19,13 +21,13 @@ impl DiscordRPC {
             .as_secs() as i64;
 
         let client = Arc::new(Mutex::new(None));
-        
+
         let client_clone = client.clone();
         tokio::spawn(async move {
             let client_id = "622783718783844356";
             loop {
                 eprintln!("[Discord] Attempting to connect in background...");
-                
+
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 std::thread::spawn(move || {
                     let res = (|| {
@@ -66,7 +68,7 @@ impl PlaybackExtension for DiscordRPC {
         if info.title.is_empty() {
             return;
         }
-        
+
         let mut client_lock = self.client.lock().unwrap();
         if let Some(ref mut client) = *client_lock {
             let mut last_title = self.last_title.lock().unwrap();
@@ -77,9 +79,12 @@ impl PlaybackExtension for DiscordRPC {
             if *last_title == info.title && *last_paused == info.is_paused && *has_activity {
                 return;
             }
-            
-            eprintln!("[Discord] Updating activity: {} - {} (paused: {})", info.title, info.artist, info.is_paused);
-            
+
+            eprintln!(
+                "[Discord] Updating activity: {} - {} (paused: {})",
+                info.title, info.artist, info.is_paused
+            );
+
             if *last_title != info.title {
                 *start_time = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -92,7 +97,7 @@ impl PlaybackExtension for DiscordRPC {
             *has_activity = true;
 
             let mut act = activity::Activity::new();
-            
+
             let state = if info.is_paused {
                 "Paused".to_string()
             } else {
@@ -102,15 +107,18 @@ impl PlaybackExtension for DiscordRPC {
                     "Playing".to_string()
                 }
             };
-            
-            act = act.details(&info.title).state(&state).activity_type(activity::ActivityType::Watching);
+
+            act = act
+                .details(&info.title)
+                .state(&state)
+                .activity_type(activity::ActivityType::Watching);
 
             if !info.is_paused && info.duration_secs > 0 {
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs() as i64;
-                
+
                 let start = now - info.position_secs;
                 let end = start + info.duration_secs;
                 act = act.timestamps(activity::Timestamps::new().start(start).end(end));
@@ -142,13 +150,21 @@ impl PlaybackExtension for DiscordRPC {
 
 pub struct DiscordExtensionFactory;
 
+#[async_trait]
 impl AmpPlugin for DiscordExtensionFactory {
-    fn id(&self) -> &'static str { "discord" }
-    fn display_name(&self) -> &'static str { "Discord Rich Presence" }
+    fn id(&self) -> &'static str {
+        "discord"
+    }
+    fn display_name(&self) -> &'static str {
+        "Discord Rich Presence"
+    }
     fn capabilities(&self) -> Vec<PluginCapability> {
         vec![PluginCapability::PlaybackExtension]
     }
-    fn create_extension(&self) -> Result<Arc<dyn PlaybackExtension>, Box<dyn std::error::Error + Send + Sync>> {
+    async fn create_extension(
+        &self,
+        _config: HashMap<String, String>,
+    ) -> Result<Arc<dyn PlaybackExtension>, AmpError> {
         Ok(Arc::new(DiscordRPC::new()))
     }
 }

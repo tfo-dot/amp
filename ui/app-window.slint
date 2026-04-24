@@ -1,6 +1,8 @@
 import { Button, HorizontalBox, VerticalBox, Slider, ScrollView, LineEdit } from "std-widgets.slint";
 import { TrackSelector, TrackInfo } from "./trackselector.slint";
 
+import { Player } from "./player.slint";
+
 export struct GridItem {
     id: string,
     name: string,
@@ -9,7 +11,8 @@ export struct GridItem {
     meta: string,
     series_name: string,
     is_folder: bool,
-    index: int
+    index: int,
+    season_index: int
 }
 
 export struct ProviderMetadata {
@@ -31,6 +34,46 @@ export struct Episode {
     resume_time: string,
 }
 
+component NavRectangle inherits Rectangle {
+    in-out property <string> current_screen;
+
+    in property <string> name;
+    in property <string> initial; 
+
+    height: 60px;
+    background: root.current_screen == root.name ? #333 : transparent;
+    border-radius: 8px;
+    Text { text: root.initial; font-size: 24px; horizontal-alignment: center; vertical-alignment: center; }
+    TouchArea { clicked => { root.current_screen = root.name; } }
+}
+
+component ExtensionTile inherits Rectangle {
+    callback select_provider(string);
+
+    in property <ProviderMetadata> provider;
+
+    width: 300px;
+    height: 60px;
+    background: prov-touch.has-hover ? #333 : #222;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #444;
+    animate background { duration: 150ms; }
+
+    Text {
+        text: provider.name;
+        color: white;
+        font-size: 18px;
+        font-weight: 600;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
+
+    prov-touch := TouchArea {
+        clicked => { root.select_provider(provider.id); }
+    }
+}
+
 export component PlayerWindow inherits Window {
     title: "AMP - Advanced Media Player";
     background: #0b0b0b;
@@ -48,8 +91,12 @@ export component PlayerWindow inherits Window {
     callback select_audio_track(int);
     callback select_subtitle_track(int);
     callback select_provider(string);
-    callback logout();
     callback close_player();
+    callback search(string);
+    callback select_search_result(int);
+
+    callback next();
+    callback previous();
 
     // Global State
     in-out property <string> current_screen: "provider_select";
@@ -60,10 +107,11 @@ export component PlayerWindow inherits Window {
     in-out property <bool> is_loading: false;
 
     // Library Data
-    in property <[GridItem]> breadcrumbs: [];
     in property <[GridItem]> current_items: [];
     in property <[GridItem]> next_up_list: [];
+    in property <[GridItem]> search_results: [];
     in property <string> current_folder_name: "Library";
+    in-out property <string> search_query: "";
 
     // Player Properties
     in property <image> video_frame;
@@ -72,7 +120,10 @@ export component PlayerWindow inherits Window {
     in property <string> time_pos: "00:00";
     in property <string> duration: "00:00";
     in property <bool> controls_visible: true;
-    
+
+    in property <bool> has_next: false;
+    in property <bool> has_previous: false;
+
     in property <[TrackInfo]> audio_tracks: [];
     in property <[TrackInfo]> subtitle_tracks: [];
     in property <string> audio_track_name: "Default";
@@ -82,228 +133,340 @@ export component PlayerWindow inherits Window {
     out property <length> video_width: video_area.width;
     out property <length> video_height: video_area.height;
 
-    // --- -1. PROVIDER SELECT SCREEN ---
-    if (root.current_screen == "provider_select") : VerticalLayout {
-        alignment: center;
-        spacing: 20px;
-        padding: 40px;
+    HorizontalLayout {
+        if (root.current_screen != "player") : Rectangle {
+            width: 80px;
+            background: #151515;
+            VerticalLayout {
+                padding: 10px;
+                spacing: 20px;
+                alignment: start;
 
-        Text {
-            text: "Select Media Provider";
-            font-size: 32px;
-            font-weight: 700;
-            color: white;
-            horizontal-alignment: center;
+                NavRectangle { current_screen <=> root.current_screen; name: "library"; initial: "H"; }
+                NavRectangle { current_screen <=> root.current_screen; name: "search"; initial: "S"; }
+                NavRectangle { current_screen <=> root.current_screen; name: "provider_select"; initial: "E"; }
+            }
         }
 
         VerticalLayout {
-            spacing: 15px;
-            alignment: center;
-            for provider in root.available_providers : Rectangle {
-                width: 300px;
-                height: 60px;
-                background: prov-touch.has-hover ? #333 : #222;
-                border-radius: 8px;
-                border-width: 1px;
-                border-color: #444;
-                animate background { duration: 150ms; }
+            // --- -1. PROVIDER SELECT SCREEN ---
+            if (root.current_screen == "provider_select") : VerticalLayout {
+                spacing: 20px;
+                padding: 40px;
 
                 Text {
-                    text: provider.name;
-                    color: white;
-                    font-size: 18px;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                    horizontal-alignment: center;
-                }
-
-                prov-touch := TouchArea {
-                    clicked => { root.select_provider(provider.id); }
-                }
-            }
-        }
-    }
-
-    // --- 0. LOGIN SCREEN ---
-    if (root.current_screen == "login") : VerticalLayout {
-        alignment: center;
-        spacing: 30px;
-        padding: 40px;
-
-        Text {
-            text: "Connect to " + root.selected_provider_id;
-            font-size: 32px;
-            font-weight: 700;
-            color: white;
-            horizontal-alignment: center;
-        }
-
-        Rectangle {
-            width: 450px;
-            background: #1a1a1a;
-            border-radius: 12px;
-            padding: 30px;
-
-            VerticalLayout {
-                spacing: 20px;
-                padding: 20px;
-
-                for field[i] in root.config_fields : VerticalLayout {
-                    spacing: 8px;
-                    Text { text: field.label; color: #aaa; font-size: 14px; }
-                    LineEdit {
-                        text: field.value;
-                        input-type: field.is_password ? password : text;
-                        edited(val) => { root.config_fields[i].value = val; }
-                    }
-                }
-
-                if (root.error_message != "") : Text {
-                    text: root.error_message;
-                    color: #ff4444;
-                    font-size: 14px;
-                    horizontal-alignment: center;
-                }
-
-                Button {
-                    text: "Connect";
-                    primary: true;
-                    enabled: !root.is_loading;
-                    clicked => { root.login(root.selected_provider_id, root.config_fields); }
-                }
-
-                Button {
-                    text: "Cancel";
-                    clicked => { root.current_screen = "provider_select"; }
-                }
-            }
-        }
-    }
-
-    // --- 1. LIBRARY / TREE BROWSER SCREEN ---
-    if (root.current_screen == "library") : VerticalLayout {
-        padding: 40px;
-        spacing: 20px;
-
-        HorizontalLayout {
-            alignment: space-between;
-            HorizontalLayout {
-                spacing: 20px;
-                if (root.breadcrumbs.length > 0) : Button {
-                    text: "← Back";
-                    clicked => { root.back(); }
-                }
-                Text {
-                    text: root.current_folder_name;
+                    text: "Extensions";
                     font-size: 32px;
                     font-weight: 700;
                     color: white;
                 }
-            }
-            Button {
-                text: "Logout";
-                clicked => { root.logout(); }
-            }
-        }
+                
+                VerticalLayout {
+                    width: 100%;
+                    height: 100%;
+                    spacing: 15px;
 
-        ScrollView {
-            VerticalLayout {
-                spacing: 30px;
+                    for provider in root.available_providers : ExtensionTile {
+                        provider: provider;
 
-                // Next Up - Only at root level
-                if (root.breadcrumbs.length == 0 && root.next_up_list.length > 0) : VerticalLayout {
-                    spacing: 10px;
-                    Text {
-                        text: "Next Up";
-                        font-size: 24px;
-                        font-weight: 600;
-                        color: #ff9900;
+                        select_provider(s) => root.select_provider(s);
                     }
-                    
-                    ScrollView {
-                        height: 210px;
-                        viewport-height: 200px;
-                        HorizontalLayout {
-                            padding-bottom: 10px;
-                            spacing: 20px;
-                            alignment: start;
-                            for s[i] in root.next_up_list : Rectangle {
-                                width: 260px;
-                                height: 200px;
-                                background: #1a1a1a;
-                                border-radius: 8px;
-                                clip: true;
+                }
+            }
 
-                                VerticalLayout {
-                                    Rectangle {
-                                        height: 120px;
-                                        Image {
-                                            source: s.thumbnail;
-                                            width: 100%;
-                                            height: 100%;
-                                            image-fit: contain;
-                                        }
-                                    }
+            // --- 0. LOGIN SCREEN ---
+            if (root.current_screen == "login") : VerticalLayout {
+                alignment: center;
+                spacing: 30px;
+                padding: 40px;
 
-                                    Rectangle {
+                Text {
+                    text: "Connect to " + root.selected_provider_id;
+                    font-size: 32px;
+                    font-weight: 700;
+                    color: white;
+                    horizontal-alignment: center;
+                }
+
+                Rectangle {
+                    width: 450px;
+                    background: #1a1a1a;
+                    border-radius: 12px;
+
+                    VerticalLayout {
+                        spacing: 20px;
+                        padding: 20px;
+
+                        for field[i] in root.config_fields : VerticalLayout {
+                            spacing: 8px;
+                            Text { text: field.label; color: #aaa; font-size: 14px; }
+                            LineEdit {
+                                text: field.value;
+                                input-type: field.is_password ? password : text;
+                                edited(val) => { root.config_fields[i].value = val; }
+                            }
+                        }
+
+                        if (root.error_message != "") : Text {
+                            text: root.error_message;
+                            color: #ff4444;
+                            font-size: 14px;
+                            horizontal-alignment: center;
+                        }
+
+                        Button {
+                            text: "Connect";
+                            primary: true;
+                            enabled: !root.is_loading;
+                            clicked => { root.login(root.selected_provider_id, root.config_fields); }
+                        }
+
+                        Button {
+                            text: "Cancel";
+                            clicked => { root.current_screen = "provider_select"; }
+                        }
+                    }
+                }
+            }
+
+            // --- 1. LIBRARY / TREE BROWSER SCREEN ---
+            if (root.current_screen == "library") : VerticalLayout {
+                padding: 40px;
+                spacing: 20px;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    width: 100%;
+
+                    HorizontalLayout {
+                        spacing: 20px;
+                        Text {
+                            text: root.current_folder_name;
+                            font-size: 32px;
+                            font-weight: 700;
+                            color: white;
+                        }
+
+                        if (root.current_folder_name != "Library") : Button {
+                            text: "Back";
+                            clicked => { root.back(); }
+                        } 
+                    }
+                }
+
+                ScrollView {
+                    VerticalLayout {
+                        width: 100%;
+
+                        if (root.current_folder_name == "Library") : VerticalLayout {
+                            spacing: 10px;
+
+                            Text {
+                                text: "Next Up";
+                                font-size: 24px;
+                                font-weight: 600;
+                                color: #ff9900;
+                            }
+
+                            if (root.next_up_list.length == 0) : Text {
+                                text: "No next items...";
+                                font-size: 16px;
+                                font-weight: 600;
+                                color: white;
+                            }
+
+                            if (root.next_up_list.length > 0) : ScrollView {
+                                HorizontalLayout {
+                                    padding-bottom: 10px;
+                                    spacing: 20px;
+                                    alignment: start;
+                                    
+                                    for s[i] in root.next_up_list : Rectangle {
+                                        width: 260px;
+                                        height: 200px;
+                                        background: #1a1a1a;
+                                        border-radius: 8px;
+                                        clip: true;
+
                                         VerticalLayout {
-                                            padding: 5px;
-                                            Text {
-                                                text: s.name;
-                                                color: white;
-                                                font-size: 14px;
-                                                font-weight: 500;
-                                                overflow: elide;
+                                            Rectangle {
+                                                height: 120px;
+                                                
+                                                Image {
+                                                    source: s.thumbnail;
+                                                    width: 100%;
+                                                    height: 100%;
+                                                    image-fit: contain;
+                                                }
                                             }
-                                            Text {
-                                                text: s.series_name;
-                                                color: #aaa;
-                                                font-size: 12px;
-                                                overflow: elide;
+
+                                            Rectangle {
+                                                VerticalLayout {
+                                                    padding: 5px;
+                                                    
+                                                    Text {
+                                                        text: s.name;
+                                                        color: white;
+                                                        font-size: 14px;
+                                                        font-weight: 500;
+                                                        overflow: elide;
+                                                    }
+                                                    
+                                                    Text {
+                                                        text: s.series_name;
+                                                        color: #aaa;
+                                                        font-size: 12px;
+                                                        overflow: elide;
+                                                    }
+                                                    
+                                                    HorizontalLayout {
+                                                        alignment: space-between;
+                                                        
+                                                        Text {
+                                                            text: s.description;
+                                                            color: #ff9900;
+                                                            font-size: 12px;
+                                                            overflow: elide;
+                                                        }
+                                                        
+                                                        Text {
+                                                            text: "Jellyfin";
+                                                            color: #ff9900;
+                                                            font-size: 12px;
+                                                            overflow: elide;
+                                                        }
+                                                    }
+                                                }
                                             }
-                                            Text {
-                                                text: s.description;
-                                                color: #ff9900;
-                                                font-size: 12px;
-                                                overflow: elide;
-                                            }
+                                        }
+
+                                        TouchArea {
+                                            clicked => { root.select_next_up(i); }
                                         }
                                     }
                                 }
+                            }
+                        }
 
-                                TouchArea {
-                                    clicked => { root.select_next_up(i); }
+                        // Current Folder Content
+                        if (root.current_folder_name != "Library") : VerticalLayout {
+                            width: 100%;
+                            height: 100%;
+                            spacing: 10px;
+                            
+                            GridLayout {
+                                spacing: 20px;
+                                for item[i] in root.current_items : Rectangle {
+                                    row: Math.floor(i / 4);
+                                    col: Math.mod(i, 4);
+                                    width: 220px;
+                                    height: item.is_folder ? 280px : 120px;
+                                    background: item-touch.has-hover ? #222 : #1a1a1a;
+                                    border-radius: 8px;
+                                    clip: true;
+                                    animate background { duration: 150ms; }
+
+                                    VerticalLayout {
+                                        if (item.is_folder) : Rectangle {
+                                            height: 220px;
+                                            Image {
+                                                source: item.thumbnail;
+                                                width: 100%;
+                                                height: 100%;
+                                                image-fit: contain;
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            VerticalLayout {
+                                                padding: 10px;
+                                                Text {
+                                                    text: (item.is_folder ? "" : item.index + ". ") + item.name;
+                                                    color: white;
+                                                    font-size: 16px;
+                                                    font-weight: 500;
+                                                    overflow: elide;
+                                                }
+                                                if (!item.is_folder) : HorizontalLayout {
+                                                    Text {
+                                                        text: item.description;
+                                                        color: #aaa;
+                                                        font-size: 12px;
+                                                    }
+                                                    if (item.meta != "") : Text {
+                                                        text: " Stopped at " + item.meta;
+                                                        color: #ff9900;
+                                                        font-size: 12px;
+                                                    }
+                                                    Rectangle {} // spacer
+                                                    Button {
+                                                        text: "✓";
+                                                        width: 25px;
+                                                        height: 25px;
+                                                        clicked => { root.mark_as_played(i, true); }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    item-touch := TouchArea {
+                                        clicked => { root.select_item(i); }
+                                    }
                                 }
                             }
                         }
                     }
                 }
+            }
 
-                // Current Folder Content
-                VerticalLayout {
-                    spacing: 10px;
-                    Text {
-                        text: "Items";
-                        font-size: 24px;
-                        font-weight: 600;
-                        color: white;
+            // --- 2. SEARCH SCREEN ---
+            if (root.current_screen == "search") : VerticalLayout {
+                padding: 40px;
+                spacing: 20px;
+
+                width: 100%;
+
+                Text {
+                    text: "Search";
+                    font-size: 32px;
+                    font-weight: 700;
+                    color: white;
+                }
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    spacing: 15px;
+                    
+                    LineEdit {
+                        placeholder-text: "Search for series, movies or episodes...";
+                        text: root.search_query;
+                        edited(t) => { root.search_query = t; }
+                        accepted(t) => { root.search(t); }
                     }
 
+                    Button {
+                        text: "Search";
+                        primary: true;
+                        clicked => { root.search(root.search_query); }
+                    }
+                }
+
+                ScrollView {
                     GridLayout {
                         spacing: 20px;
-                        for item[i] in root.current_items : Rectangle {
+                        for item[i] in root.search_results : Rectangle {
                             row: Math.floor(i / 4);
                             col: Math.mod(i, 4);
                             width: 220px;
-                            height: item.is_folder ? 280px : 120px;
-                            background: item-touch.has-hover ? #222 : #1a1a1a;
+                            height: 280px;
+                            background: item-search-touch.has-hover ? #222 : #1a1a1a;
                             border-radius: 8px;
                             clip: true;
-                            animate background { duration: 150ms; }
 
                             VerticalLayout {
-                                if (item.is_folder) : Rectangle {
-                                    height: 220px;
+                                Rectangle {
+                                    height: 180px;
                                     Image {
                                         source: item.thumbnail;
                                         width: 100%;
@@ -311,140 +474,51 @@ export component PlayerWindow inherits Window {
                                         image-fit: contain;
                                     }
                                 }
-
-                                Rectangle {
-                                    VerticalLayout {
-                                        padding: 10px;
-                                        Text {
-                                            text: (item.is_folder ? "" : item.index + ". ") + item.name;
-                                            color: white;
-                                            font-size: 16px;
-                                            font-weight: 500;
-                                            overflow: elide;
-                                        }
-                                        if (!item.is_folder) : HorizontalLayout {
-                                            Text {
-                                                text: item.description;
-                                                color: #aaa;
-                                                font-size: 12px;
-                                            }
-                                            if (item.meta != "") : Text {
-                                                text: " Stopped at " + item.meta;
-                                                color: #ff9900;
-                                                font-size: 12px;
-                                            }
-                                            Rectangle {} // spacer
-                                            Button {
-                                                text: "✓";
-                                                width: 25px;
-                                                height: 25px;
-                                                clicked => { root.mark_as_played(i, true); }
-                                            }
-                                        }
-                                    }
+                                VerticalLayout {
+                                    padding: 10px;
+                                    Text { text: item.name; color: white; font-size: 14px; font-weight: 600; overflow: elide; }
+                                    Text { text: item.description; color: #aaa; font-size: 12px; height: 30px; overflow: elide; }
                                 }
                             }
 
-                            item-touch := TouchArea {
-                                clicked => { root.select_item(i); }
+                            item-search-touch := TouchArea {
+                                clicked => { root.select_search_result(i); }
                             }
                         }
                     }
                 }
             }
         }
-    }
 
-    // --- 3. PLAYER SCREEN ---
-    video_area := Rectangle {
-        visible: root.current_screen == "player";
-        width: 100%;
-        height: 100%;
-        background: black;
+        video_area := Player {
+            visible: root.current_screen == "player";
 
-        Image {
-            source: root.video_frame;
-            width: 100%;
-            height: 100%;
-            image-fit: contain;
-        }
+            video_frame: root.video_frame;
+            is_paused: root.is_paused;
+            progress: root.progress;
+            time_pos: root.time_pos;
+            duration: root.duration;
+            controls_visible: root.controls_visible;
 
-        TouchArea {
-            // Keep visibility on click
-            clicked => { root.user_activity(); }
-            // Move activity
-            pointer-event(evt) => { root.user_activity(); }
-        }
+            audio_tracks: root.audio_tracks;
+            subtitle_tracks: root.subtitle_tracks;
+            audio_track_name: root.audio_track_name;
+            subtitle_track_name: root.subtitle_track_name;
 
-        // Overlay Controls
-        if root.controls_visible : Rectangle {
-            background: #00000088;
-            height: 120px;
-            width: 100%;
-            y: parent.height - self.height;
+            has_next: root.has_next;
+            has_previous: root.has_previous;
 
-            VerticalLayout {
-                padding: 20px;
-                spacing: 10px;
+            next() => root.next();
+            previous => root.previous();
 
-                // Progress Bar
-                HorizontalLayout {
-                    spacing: 15px;
-                    Text { text: root.time_pos; color: white; vertical-alignment: center; }
-                    Slider {
-                        value: root.progress;
-                        minimum: 0;
-                        maximum: 100;
-                        changed(val) => { root.seek(val); }
-                    }
-                    Text { text: root.duration; color: white; vertical-alignment: center; }
-                }
-
-                // Controls
-                HorizontalLayout {
-                    spacing: 20px;
-                    alignment: center;
-
-                    Button {
-                        text: "← 10s";
-                        clicked => { root.skip_by(-10); }
-                    }
-
-                    Button {
-                        text: root.is_paused ? "▶" : "⏸";
-                        width: 60px;
-                        clicked => { root.toggle_pause(); }
-                    }
-
-                    Button {
-                        text: "10s →";
-                        clicked => { root.skip_by(10); }
-                    }
-                    
-                    Rectangle { width: 40px; } // spacer
-
-                    TrackSelector {
-                        label: "Audio:";
-                        tracks: root.audio_tracks;
-                        current_name: root.audio_track_name;
-                        select_track(id) => { root.select_audio_track(id); }
-                    }
-
-                    TrackSelector {
-                        label: "Subtitles:";
-                        tracks: root.subtitle_tracks;
-                        current_name: root.subtitle_track_name;
-                        select_track(id) => { root.select_subtitle_track(id); }
-                    }
-
-                    Rectangle { width: 40px; } // spacer
-
-                    Button {
-                        text: "Close";
-                        clicked => { root.close_player(); }
-                    }
-                }
-            }
+            toggle_pause => toggle_pause();
+            skip_by(i) => skip_by(i);
+            seek(f) => seek(f);
+            user_activity => user_activity();
+            back => back();
+            select_audio_track(idx) => select_audio_track(idx);
+            select_subtitle_track(idx) => select_subtitle_track(idx);
+            close_player => close_player();
         }
     }
 
