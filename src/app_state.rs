@@ -12,7 +12,7 @@ pub struct PlaylistItem {
 }
 
 pub struct AppState {
-    pub nav_stack: Vec<(String, String)>, // (id, name)
+    pub nav_stack: Vec<(String, String)>,         // (id, name)
     pub current_items_ids: Vec<(String, String)>, // (provider_id, item_id)
     pub next_up_ids: Vec<(String, String)>,
     pub active_playlist: Option<(Vec<PlaylistItem>, usize)>,

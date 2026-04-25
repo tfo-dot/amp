@@ -11,18 +11,97 @@ mod navigation;
 mod player;
 mod plugin_manager;
 
-use amp_api::{MediaItemType, PlaybackInfo, PluginCapability};
+use amp_api::{MediaItemType, PlaybackInfo};
 use app_state::{AppState, PlaylistItem};
 use fbo::GLResources;
 use glow::HasContext;
 use image_cache::ImageCache;
 use libmpv_sys::*;
 use navigation::{format_time, image_from_raw, load_dashboard, load_folder};
-use player::{open_player, MpvHandle, MpvRenderCtx};
+use player::{MpvHandle, MpvRenderCtx, open_player};
 use plugin_manager::PluginManager;
-use slint::{BorrowedOpenGLTextureBuilder, BorrowedOpenGLTextureOrigin, ComponentHandle, Model};
+use slint::{BorrowedOpenGLTextureBuilder, BorrowedOpenGLTextureOrigin, ComponentHandle, Model, Weak};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
+
+struct AppPlaybackController {
+    ui: Weak<PlayerWindow>,
+    mpv: MpvHandle,
+}
+
+impl amp_api::PlaybackController for AppPlaybackController {
+    fn play(&self) {
+        let c_pause = CString::new("pause").unwrap();
+        let paused: c_int = 0;
+        unsafe {
+            mpv_set_property(
+                self.mpv.get(),
+                c_pause.as_ptr(),
+                mpv_format_MPV_FORMAT_FLAG,
+                &paused as *const _ as *mut c_void,
+            );
+        }
+    }
+
+    fn pause(&self) {
+        let c_pause = CString::new("pause").unwrap();
+        let paused: c_int = 1;
+        unsafe {
+            mpv_set_property(
+                self.mpv.get(),
+                c_pause.as_ptr(),
+                mpv_format_MPV_FORMAT_FLAG,
+                &paused as *const _ as *mut c_void,
+            );
+        }
+    }
+
+    fn toggle_pause(&self) {
+        let ui_weak = self.ui.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.invoke_toggle_pause();
+            }
+        });
+    }
+
+    fn next(&self) {
+        let ui_weak = self.ui.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.invoke_next();
+            }
+        });
+    }
+
+    fn previous(&self) {
+        let ui_weak = self.ui.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.invoke_previous();
+            }
+        });
+    }
+
+    fn stop(&self) {
+        let ui_weak = self.ui.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.invoke_close_player();
+            }
+        });
+    }
+
+    fn seek(&self, position_secs: i64) {
+        let scmd = CString::new("seek").unwrap();
+        let sval = CString::new(position_secs.to_string()).unwrap();
+        let smode = CString::new("absolute").unwrap();
+        let mut sargs = [scmd.as_ptr(), sval.as_ptr(), smode.as_ptr(), ptr::null()];
+        unsafe {
+            mpv_command(self.mpv.get(), sargs.as_mut_ptr());
+        }
+    }
+}
 use std::os::raw::{c_char, c_int, c_void};
 use std::ptr;
 use std::rc::Rc;
@@ -31,10 +110,9 @@ use std::sync::{Arc, Mutex};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[AMP] Starting up...");
-    // TODO: Audit that the environment access only happens in single-threaded code.
-    unsafe { std::env::set_var("LC_NUMERIC", "C") };
 
     unsafe {
+        std::env::set_var("LC_NUMERIC", "C");
         let c_locale = CString::new("C").unwrap();
         libc::setlocale(libc::LC_ALL, c_locale.as_ptr());
         libc::setlocale(libc::LC_NUMERIC, c_locale.as_ptr());
@@ -51,10 +129,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     plugin_manager.register_builtin_plugin(Arc::new(discord::DiscordExtensionFactory));
     plugin_manager.load_plugins();
 
-    let extensions = Arc::new(plugin_manager.get_extensions());
-
     let provider_list: Vec<ProviderMetadata> = plugin_manager
-        .with_capability(PluginCapability::MediaProvider)
+        .with_capability(amp_api::PluginCapability::MediaProvider)
         .iter()
         .map(|f| ProviderMetadata {
             id: f.id().into(),
@@ -72,6 +148,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     eprintln!("[AMP] Creating MpvHandle...");
     let mpv = MpvHandle::new();
+
+    let controller = Arc::new(AppPlaybackController {
+        ui: ui.as_weak(),
+        mpv: mpv.clone(),
+    });
+
+    let extensions = Arc::new(plugin_manager.lock().unwrap().get_extensions(controller));
 
     let mpv_render: Rc<RefCell<Option<MpvRenderCtx>>> = Rc::new(RefCell::new(None));
     let gl_resources: Rc<RefCell<Option<GLResources>>> = Rc::new(RefCell::new(None));
@@ -296,7 +379,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let ui_weak = ui_search_sel.clone();
         let ui = ui_weak.upgrade().unwrap();
-        
+
         let state_arc = state_search_sel.clone();
 
         let item = ui.get_search_results().row_data(index as usize).unwrap();
@@ -493,17 +576,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 s.active_playlist = Some((playlist_items, index as usize));
                 s.current_title = item.name.to_string();
                 s.current_artist = item.series_name.to_string();
+
+                s.current_series_name = Some(item.series_name.to_string());
+                s.current_season_index = Some(item.season_index);
+                s.current_episode_index = Some(item.index);
+
+                s.current_item_id = Some((p_id, item_id))
             }
 
-            let series = Some(item.series_name.to_string());
-            let season = Some(item.season_index);
-            let episode = Some(item.index);
+            ui.set_is_loading(true);
+            ui.set_current_screen("player".into());
 
             tokio::spawn(async move {
-                open_player(
-                    ui_weak, state_arc, mpv_h, p_id, item_id, series, season, episode,
-                )
-                .await;
+                open_player(ui_weak, state_arc, mpv_h).await;
             });
         }
     });
@@ -538,22 +623,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             s.active_playlist = Some((playlist_items, index as usize));
+
+            s.current_series_name = Some(item.series_name.to_string());
+            s.current_season_index = Some(item.season_index);
+            s.current_episode_index = Some(item.index);
+
+            s.current_item_id = Some((p_id, item_id))
         }
+
+        ui.set_is_loading(true);
+        ui.set_current_screen("player".into());
 
         let mpv_h = mpv_nu.clone();
         let ui_weak = ui_nu.clone();
         let state_arc = state_nu.clone();
 
-        let series = Some(item.series_name.to_string());
-        let season = Some(item.season_index);
-        let episode = Some(item.index);
-
-        tokio::spawn(async move {
-            open_player(
-                ui_weak, state_arc, mpv_h, p_id, item_id, series, season, episode,
-            )
-            .await
-        });
+        tokio::spawn(async move { open_player(ui_weak, state_arc, mpv_h).await });
     });
 
     let ui_back = ui.as_weak();
@@ -750,36 +835,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mpv_next = mpv.clone();
     let state_next = state.clone();
     ui.on_next(move || {
-        let (p_id, item_id, series, season, episode) = {
+        {
             let mut s = state_next.lock().unwrap();
-            if let Some((items, idx)) = s.active_playlist.as_mut() {
-                if *idx + 1 < items.len() {
-                    *idx += 1;
-                    let item = items[*idx].clone();
-                    s.current_title = item.name.clone();
-                    s.current_artist = item.series_name.clone();
-                    (
-                        item.p_id,
-                        item.item_id,
-                        Some(item.series_name),
-                        Some(item.season_index),
-                        Some(item.index),
-                    )
-                } else {
-                    return;
-                }
-            } else {
+
+            if s.active_playlist.is_none() {
                 return;
             }
-        };
+
+            let (items, idx) = s.active_playlist.as_mut().unwrap();
+
+            if *idx + 1 >= items.len() {
+                return;
+            }
+
+            *idx += 1;
+            let item = items[*idx].clone();
+            s.current_title = item.name.clone();
+            s.current_artist = item.series_name.clone();
+
+            s.current_series_name = Some(item.series_name.to_string());
+            s.current_season_index = Some(item.season_index);
+            s.current_episode_index = Some(item.index);
+
+            s.current_item_id = Some((item.p_id, item.item_id));
+        }
+
         let mpv_h = mpv_next.clone();
         let ui_weak = ui_next.clone();
         let state_arc = state_next.clone();
         tokio::spawn(async move {
-            open_player(
-                ui_weak, state_arc, mpv_h, p_id, item_id, series, season, episode,
-            )
-            .await;
+            open_player(ui_weak, state_arc, mpv_h).await;
         });
     });
 
@@ -787,36 +872,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mpv_prev = mpv.clone();
     let state_prev = state.clone();
     ui.on_previous(move || {
-        let (p_id, item_id, series, season, episode) = {
+        {
             let mut s = state_prev.lock().unwrap();
-            if let Some((items, idx)) = s.active_playlist.as_mut() {
-                if *idx > 0 {
-                    *idx -= 1;
-                    let item = items[*idx].clone();
-                    s.current_title = item.name.clone();
-                    s.current_artist = item.series_name.clone();
-                    (
-                        item.p_id,
-                        item.item_id,
-                        Some(item.series_name),
-                        Some(item.season_index),
-                        Some(item.index),
-                    )
-                } else {
-                    return;
-                }
-            } else {
+
+            if s.active_playlist.is_none() {
                 return;
             }
-        };
+
+            let (items, idx) = s.active_playlist.as_mut().unwrap();
+
+            if *idx == 0 {
+                return;
+            }
+
+            *idx -= 1;
+
+            let item = items[*idx].clone();
+            
+            s.current_title = item.name.clone();
+            s.current_artist = item.series_name.clone();
+
+            s.current_series_name = Some(item.series_name.to_string());
+            s.current_season_index = Some(item.season_index);
+            s.current_episode_index = Some(item.index);
+
+            s.current_item_id = Some((item.p_id, item.item_id));
+        }
+
         let mpv_h = mpv_prev.clone();
         let ui_weak = ui_prev.clone();
         let state_arc = state_prev.clone();
+
         tokio::spawn(async move {
-            open_player(
-                ui_weak, state_arc, mpv_h, p_id, item_id, series, season, episode,
-            )
-            .await;
+            open_player(ui_weak, state_arc, mpv_h).await;
         });
     });
 
@@ -827,6 +915,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let last_report = Arc::new(Mutex::new(std::time::Instant::now()));
     let last_ext_update = Arc::new(Mutex::new(std::time::Instant::now()));
+
+    let c_time = CString::new("time-pos").unwrap();
+    let c_dur = CString::new("duration").unwrap();
+    let c_perc = CString::new("percent-pos").unwrap();
+    let c_pause = CString::new("pause").unwrap();
 
     let render_timer = slint::Timer::default();
     render_timer.start(
@@ -853,6 +946,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if (*ev).event_id == mpv_event_id_MPV_EVENT_NONE {
                             break;
                         }
+
+                        if (*ev).event_id == mpv_event_id_MPV_EVENT_TRACKS_CHANGED {
+                            update_tracks(&ui, mpv_h.get());
+                        }
                     }
 
                     if let Some(rctx) = mpv_r.borrow().as_ref() {
@@ -865,10 +962,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut dur: i64 = 0;
                     let mut perc: f64 = 0.0;
                     let mut paused: c_int = 0;
-                    let c_time = CString::new("time-pos").unwrap();
-                    let c_dur = CString::new("duration").unwrap();
-                    let c_perc = CString::new("percent-pos").unwrap();
-                    let c_pause = CString::new("pause").unwrap();
                     if mpv_get_property(
                         mpv_h.get(),
                         c_perc.as_ptr(),
@@ -896,6 +989,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     {
                         ui.set_duration(format_time(dur).into());
                     }
+
                     if mpv_get_property(
                         mpv_h.get(),
                         c_pause.as_ptr(),
@@ -944,53 +1038,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Ok(mut last) = last_report.lock() {
                         if last.elapsed() >= std::time::Duration::from_secs(10) {
                             *last = std::time::Instant::now();
-                            let (prov, id, p_id) = {
+
+                            let report_data = {
                                 let s = state_arc.lock().unwrap();
-                                let item = s.current_item_id.clone();
-                                let p = item
-                                    .as_ref()
-                                    .and_then(|(p_id, _)| s.active_providers.get(p_id).cloned());
-                                (
-                                    p,
-                                    item.as_ref().map(|(_, id)| id.clone()),
-                                    item.as_ref().map(|(p_id, _)| p_id.clone()),
-                                )
+                                s.current_item_id.as_ref().and_then(|(p_id, id)| {
+                                    s.active_providers
+                                        .get(p_id)
+                                        .map(|p| (p.clone(), id.clone(), p_id.clone()))
+                                })
                             };
 
-                            if let (Some(p), Some(id), Some(p_id)) = (prov, id, p_id) {
-                                eprintln!("[AMP] Updating playback for: {}", p_id);
+                            if let Some((provider, item_id, provider_id)) = report_data {
+                                eprintln!("[AMP] Syncing progress to: {}", provider_id);
+
                                 let time_i64 = time as i64;
+                                let is_paused = paused != 0;
+
                                 tokio::spawn(async move {
-                                    let _ = p
-                                        .report_playback_progress(&id, time_i64, paused != 0)
+                                    let _ = provider
+                                        .report_playback_progress(&item_id, time_i64, is_paused)
                                         .await;
                                 });
                             }
                         }
-                    }
-
-                    let c_tracks = CString::new("track-list").unwrap();
-                    let tptr = mpv_get_property_string(mpv_h.get(), c_tracks.as_ptr());
-                    if !tptr.is_null() {
-                        let js = CStr::from_ptr(tptr).to_string_lossy();
-                        if let Ok(tracks) = serde_json::from_str::<Vec<Track>>(&js) {
-                            let mut alist = Vec::new();
-                            let mut slist = Vec::new();
-                            for t in &tracks {
-                                match t.track_type {
-                                    TrackType::Audio => alist.push(t.as_track_info()),
-                                    TrackType::Sub => slist.push(t.as_track_info()),
-                                    _ => (),
-                                }
-                            }
-                            ui.set_audio_tracks(slint::ModelRc::from(std::rc::Rc::new(
-                                slint::VecModel::from(alist),
-                            )));
-                            ui.set_subtitle_tracks(slint::ModelRc::from(std::rc::Rc::new(
-                                slint::VecModel::from(slist),
-                            )));
-                        }
-                        mpv_free(tptr as *mut c_void);
                     }
                 }
             }
@@ -1010,40 +1080,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ui_weak = ui.as_weak();
         let pm = plugin_manager.clone();
         let state_arc = state.clone();
+        let cache_arc = cache.clone();
 
         tokio::spawn(async move {
-            for (provider_id, config) in saved_configs {
-                let factory = pm.lock().unwrap().get_plugin(&provider_id);
+            let init_tasks = {
+                let lock = pm.lock().unwrap();
 
-                if let None = factory {
-                    eprintln!(
-                        "[AMP] Trying to load config for missing provider: {}",
-                        provider_id
-                    );
+                saved_configs
+                    .into_iter()
+                    .filter_map(|(id, config)| {
+                        lock.get_plugin(&id).map(|factory| (id, factory, config))
+                    })
+                    .collect::<Vec<_>>()
+            };
 
-                    continue;
-                }
-
-                match factory.unwrap().create_provider(config).await {
-                    Ok(client) => {
-                        let mut s = state_arc.lock().unwrap();
-
-                        s.active_providers
-                            .insert(provider_id.clone(), client.clone());
-
-                        eprintln!(
-                            "[AMP] Successfully initialized form file for plugin {}",
-                            provider_id
-                        )
+            let results: Vec<_> = futures::future::join_all(init_tasks.into_iter().map(
+                |(id, factory, config)| async move {
+                    match factory.create_provider(config).await {
+                        Ok(client) => Some((id, client)),
+                        Err(e) => {
+                            eprintln!("[AMP] Error initializing plugin {}: {}", id, e);
+                            None
+                        }
                     }
-                    Err(e) => eprintln!(
-                        "[AMP] error initializing config from file for plugin {}, {}",
-                        provider_id, e
-                    ),
+                },
+            ))
+            .await
+            .into_iter()
+            .flatten()
+            .collect();
+
+            if !results.is_empty() {
+                let mut s = state_arc.lock().unwrap();
+                for (id, client) in results {
+                    eprintln!("[AMP] Successfully initialized plugin {}", id);
+                    s.active_providers.insert(id, client);
                 }
             }
 
-            let _ = load_dashboard(state_arc, ui_weak.clone(), cache).await;
+            let _ = load_dashboard(state_arc, ui_weak.clone(), cache_arc).await;
 
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = ui_weak.upgrade() {
@@ -1061,6 +1136,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     mpv.stop();
     Ok(result?)
+}
+
+unsafe fn update_tracks(ui: &PlayerWindow, mpv_h: *mut mpv_handle) {
+    let c_tracks = CString::new("track-list").unwrap();
+    let tptr = unsafe { mpv_get_property_string(mpv_h, c_tracks.as_ptr()) };
+    if !tptr.is_null() {
+        let js = unsafe { CStr::from_ptr(tptr) }.to_string_lossy();
+        if let Ok(tracks) = serde_json::from_str::<Vec<Track>>(&js) {
+            let mut alist = Vec::new();
+            let mut slist = Vec::new();
+
+            for t in &tracks {
+                match t.track_type {
+                    TrackType::Audio => alist.push(t.as_track_info()),
+                    TrackType::Sub => slist.push(t.as_track_info()),
+                    _ => (),
+                }
+            }
+
+            ui.set_audio_tracks(slint::ModelRc::from(std::rc::Rc::new(
+                slint::VecModel::from(alist),
+            )));
+
+            ui.set_subtitle_tracks(slint::ModelRc::from(std::rc::Rc::new(
+                slint::VecModel::from(slist),
+            )));
+        }
+        unsafe { mpv_free(tptr as *mut c_void) };
+    }
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -1106,8 +1210,10 @@ enum TrackType {
     Sub,
 }
 
-unsafe extern "C" fn get_proc_address_mpv(ctx: *mut c_void, name: *const c_char) -> *mut c_void { unsafe {
-    let get_proc_address = &*(ctx as *const &dyn Fn(&CStr) -> *const c_void);
-    let name = CStr::from_ptr(name);
-    get_proc_address(name) as *mut c_void
-}}
+unsafe extern "C" fn get_proc_address_mpv(ctx: *mut c_void, name: *const c_char) -> *mut c_void {
+    unsafe {
+        let get_proc_address = &*(ctx as *const &dyn Fn(&CStr) -> *const c_void);
+        let name = CStr::from_ptr(name);
+        get_proc_address(name) as *mut c_void
+    }
+}

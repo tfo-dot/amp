@@ -5,8 +5,9 @@ AMP is a highly extensible, blazingly fast media player built with Rust and Slin
 - **Runtime Extensions**: Loads dynamic libraries (`.so` / `.dll`) at runtime to extend functionality.
 - **Hardware Accelerated Playback**: Uses `libmpv` for high-performance, hardware-accelerated video playback.
 - **Modern UI**: Built with Slint for a smooth and responsive user interface.
+- **Rich Metadata**: Support for posters, episode information, and watch status synchronization.
 - **Built-in Integrations**:
-  - **Jellyfin**: Full support for browsing and streaming from Jellyfin servers.
+  - **Jellyfin**: Full support for browsing, searching, and streaming from Jellyfin servers.
   - **Discord RPC**: Automatically updates your Discord status with current playback info.
 
 ## Architecture
@@ -33,6 +34,16 @@ Clone the repository and run:
 ```bash
 cargo run --release
 ```
+
+## Configuration
+
+AMP stores its configuration and plugins in the standard OS config directory:
+
+- **Linux**: `~/.config/AMP/`
+- **Windows**: `%AppData%\amp\AMP\config\`
+- **macOS**: `~/Library/Application Support/com.amp.AMP/`
+
+The `config.json` file stores provider and extension settings.
 
 ## Developing Plugins
 

@@ -63,22 +63,27 @@ impl PluginManager {
     pub unsafe fn load_plugin<P: AsRef<std::ffi::OsStr> + libloading::AsFilename>(
         &mut self,
         path: P,
-    ) -> Result<(), AmpError> { unsafe {
-        let lib = Library::new(path).map_err(|e| AmpError::Plugin(e.to_string()))?;
+    ) -> Result<(), AmpError> {
+        unsafe {
+            let lib = Library::new(path).map_err(|e| AmpError::Plugin(e.to_string()))?;
 
-        match lib.get::<Symbol<unsafe extern "C" fn() -> *mut dyn AmpPlugin>>(b"get_plugin\0")
-        { Ok(init) => {
-            let plugin_ptr = init();
-            let plugin = Arc::from_raw(plugin_ptr);
-            self.plugins.insert(plugin.id().to_string(), plugin);
-            self.libraries.push(lib);
-            Ok(())
-        } _ => {
-            Err(AmpError::Plugin(
-                "Plugin does not export get_plugin symbol".into(),
-            ))
-        }}
-    }}
+            match lib.get::<Symbol<unsafe extern "C" fn() -> *mut dyn AmpPlugin>>(b"get_plugin\0") {
+                Ok(init) => {
+                    let plugin_ptr = init();
+                    let plugin = Arc::from_raw(plugin_ptr);
+                    let pid = plugin.id().to_string();
+
+                    self.plugins.insert(pid.clone(), plugin);
+                    self.libraries.push(lib);
+                    
+                    Ok(())
+                }
+                _ => Err(AmpError::Plugin(
+                    "Plugin does not export get_plugin symbol".into(),
+                )),
+            }
+        }
+    }
 
     pub fn with_capability(&self, capability: PluginCapability) -> Vec<Arc<dyn AmpPlugin>> {
         self.plugins
@@ -116,7 +121,10 @@ impl PluginManager {
         }
     }
 
-    pub fn get_extensions(&self) -> Vec<Arc<dyn amp_api::PlaybackExtension>> {
+    pub fn get_extensions(
+        &self,
+        controller: Arc<dyn amp_api::PlaybackController>,
+    ) -> Vec<Arc<dyn amp_api::PlaybackExtension>> {
         let mut exts = Vec::new();
 
         for p in self.with_capability(PluginCapability::PlaybackExtension) {
@@ -128,6 +136,7 @@ impl PluginManager {
                 .unwrap_or_default();
 
             if let Ok(ext) = futures::executor::block_on(p.create_extension(config)) {
+                ext.set_controller(controller.clone());
                 exts.push(ext);
             }
         }

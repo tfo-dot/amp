@@ -89,6 +89,17 @@ pub struct PlaybackInfo {
 pub trait PlaybackExtension: Send + Sync {
     fn on_playback_update(&self, info: PlaybackInfo);
     fn on_playback_stop(&self);
+    fn set_controller(&self, _controller: Arc<dyn PlaybackController>) {}
+}
+
+pub trait PlaybackController: Send + Sync {
+    fn play(&self);
+    fn pause(&self);
+    fn toggle_pause(&self);
+    fn next(&self);
+    fn previous(&self);
+    fn stop(&self);
+    fn seek(&self, position_secs: i64);
 }
 
 #[async_trait]

@@ -1,10 +1,10 @@
+use crate::app_state::AppState;
 use libmpv_sys::*;
+use slint::Weak;
 use std::ffi::CString;
 use std::os::raw::c_void;
 use std::ptr;
 use std::sync::{Arc, Mutex};
-use crate::app_state::AppState;
-use slint::Weak;
 
 #[derive(Clone)]
 pub struct MpvHandle(*mut mpv_handle);
@@ -89,15 +89,17 @@ pub async fn open_player(
     ui_weak: Weak<crate::PlayerWindow>,
     state_arc: Arc<Mutex<AppState>>,
     mpv: MpvHandle,
-    p_id: String,
-    item_id: String,
-    series: Option<String>,
-    season: Option<i32>,
-    episode: Option<i32>,
 ) {
-    let provider = {
+    let (provider, item_id) = {
         let state = state_arc.lock().unwrap();
-        state.active_providers.get(&p_id).cloned()
+
+        if state.current_item_id.is_none() {
+            return;
+        }
+
+        let (provider_id, i_id) = state.current_item_id.clone().unwrap();
+
+        (state.active_providers.get(&provider_id).cloned(), i_id)
     };
 
     let provider = match provider {
@@ -108,14 +110,6 @@ pub async fn open_player(
     let resume_pos = provider.get_resume_position(&item_id).await.unwrap_or(None);
     let _ = provider.report_playback_start(&item_id).await;
     let stream_url = provider.get_stream_url(&item_id);
-
-    {
-        let mut state = state_arc.lock().unwrap();
-        state.current_item_id = Some((p_id, item_id));
-        state.current_series_name = series;
-        state.current_season_index = season;
-        state.current_episode_index = episode;
-    }
 
     let (has_prev, has_next) = {
         let state = state_arc.lock().unwrap();
@@ -151,6 +145,7 @@ pub async fn open_player(
             ui.set_current_screen("player".into());
             ui.set_has_next(has_next);
             ui.set_has_previous(has_prev);
+            ui.set_is_loading(false);
         }
     });
 }

@@ -1,6 +1,6 @@
-use amp_api::{AmpPlugin, PlaybackExtension, PlaybackInfo, PluginCapability, AmpError};
+use amp_api::{AmpError, AmpPlugin, PlaybackExtension, PlaybackInfo, PluginCapability};
 use async_trait::async_trait;
-use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
+use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -146,6 +146,8 @@ impl PlaybackExtension for DiscordRPC {
             self.last_title.lock().unwrap().clear();
         }
     }
+
+    fn set_controller(&self, _controller: Arc<dyn amp_api::PlaybackController>) {}
 }
 
 pub struct DiscordExtensionFactory;
