@@ -63,23 +63,22 @@ impl PluginManager {
     pub unsafe fn load_plugin<P: AsRef<std::ffi::OsStr> + libloading::AsFilename>(
         &mut self,
         path: P,
-    ) -> Result<(), AmpError> {
+    ) -> Result<(), AmpError> { unsafe {
         let lib = Library::new(path).map_err(|e| AmpError::Plugin(e.to_string()))?;
 
-        if let Ok(init) =
-            lib.get::<Symbol<unsafe extern "C" fn() -> *mut dyn AmpPlugin>>(b"get_plugin\0")
-        {
+        match lib.get::<Symbol<unsafe extern "C" fn() -> *mut dyn AmpPlugin>>(b"get_plugin\0")
+        { Ok(init) => {
             let plugin_ptr = init();
             let plugin = Arc::from_raw(plugin_ptr);
             self.plugins.insert(plugin.id().to_string(), plugin);
             self.libraries.push(lib);
             Ok(())
-        } else {
+        } _ => {
             Err(AmpError::Plugin(
                 "Plugin does not export get_plugin symbol".into(),
             ))
-        }
-    }
+        }}
+    }}
 
     pub fn with_capability(&self, capability: PluginCapability) -> Vec<Arc<dyn AmpPlugin>> {
         self.plugins

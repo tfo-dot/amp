@@ -31,7 +31,8 @@ use std::sync::{Arc, Mutex};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("[AMP] Starting up...");
-    std::env::set_var("LC_NUMERIC", "C");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("LC_NUMERIC", "C") };
 
     unsafe {
         let c_locale = CString::new("C").unwrap();
@@ -130,11 +131,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = api {
                                         let gl = unsafe {
                                             glow::Context::from_loader_function(|s| {
-                                                if let Ok(name) = CString::new(s) {
+                                                match CString::new(s) { Ok(name) => {
                                                     get_proc_address(&name) as *const _
-                                                } else {
+                                                } _ => {
                                                     std::ptr::null()
-                                                }
+                                                }}
                                             })
                                         };
                                         *res_lock = Some(GLResources::new(gl, width, height));
@@ -1105,8 +1106,8 @@ enum TrackType {
     Sub,
 }
 
-unsafe extern "C" fn get_proc_address_mpv(ctx: *mut c_void, name: *const c_char) -> *mut c_void {
+unsafe extern "C" fn get_proc_address_mpv(ctx: *mut c_void, name: *const c_char) -> *mut c_void { unsafe {
     let get_proc_address = &*(ctx as *const &dyn Fn(&CStr) -> *const c_void);
     let name = CStr::from_ptr(name);
     get_proc_address(name) as *mut c_void
-}
+}}
