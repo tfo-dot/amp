@@ -60,7 +60,7 @@ impl PluginManager {
         self.plugins.insert(plugin.id().to_string(), plugin);
     }
 
-    pub unsafe fn load_plugin<P: AsRef<std::ffi::OsStr>>(
+    pub unsafe fn load_plugin<P: AsRef<std::ffi::OsStr> + libloading::AsFilename>(
         &mut self,
         path: P,
     ) -> Result<(), AmpError> {
