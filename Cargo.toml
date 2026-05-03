@@ -3,7 +3,13 @@ name = "amp"
 version = "0.1.0"
 edition = "2024"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+authors = ["tfo-dot"]
+description = "A player for the anime"
+repository = "https://github.com/amp-dot/amp"
+license = "MIT"
+
+[package.metadata.aur]
+files = [["amp.desktop", "/usr/share/applications/amp.desktop"]]
 
 [dependencies]
 libmpv-sys = "3.1.0"

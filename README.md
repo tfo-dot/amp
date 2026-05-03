@@ -29,11 +29,13 @@ AMP is split into three main components:
 
 ### Running
 
-Clone the repository and run:
+Clone the repository and run, note that this will compile the latest version.
 
 ```bash
 cargo run --release
 ```
+
+For Arch Linux based systems you can use `just` build system, and `just install` to install the AUR package. The package is generated from the files along with creating the `.desktop` file for integration with menus like tofi.
 
 ## Configuration
 
