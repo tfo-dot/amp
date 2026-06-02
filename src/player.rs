@@ -111,6 +111,19 @@ pub async fn open_player(
     let _ = provider.report_playback_start(&item_id).await;
     let stream_url = provider.get_stream_url(&item_id);
 
+    let mut referer: Option<String> = None;
+    let mut final_url = stream_url.clone();
+    if let Some((url, headers_part)) = stream_url.split_once('|') {
+        final_url = url.to_string();
+        for part in headers_part.split(';') {
+            if let Some((key, val)) = part.split_once('=') {
+                if key == "Referer" {
+                    referer = Some(val.to_string());
+                }
+            }
+        }
+    }
+
     let (has_prev, has_next) = {
         let state = state_arc.lock().unwrap();
         if let Some((items, idx)) = state.active_playlist.as_ref() {
@@ -121,6 +134,21 @@ pub async fn open_player(
     };
 
     let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ref_val) = referer {
+            let c_opt = CString::new("http-header-fields").unwrap();
+            let header_str = format!("Referer: {},User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", ref_val);
+            let c_val = CString::new(header_str).unwrap();
+            unsafe {
+                mpv_set_property_string(mpv.get(), c_opt.as_ptr(), c_val.as_ptr());
+            }
+        } else {
+            let c_opt = CString::new("http-header-fields").unwrap();
+            let c_val = CString::new("").unwrap();
+            unsafe {
+                mpv_set_property_string(mpv.get(), c_opt.as_ptr(), c_val.as_ptr());
+            }
+        }
+
         if let Some(pos) = resume_pos {
             let c_start = CString::new("start").unwrap();
             let c_pos = if pos > 0 {
@@ -135,7 +163,7 @@ pub async fn open_player(
         }
 
         let cmd = CString::new("loadfile").unwrap();
-        let url = CString::new(stream_url).unwrap();
+        let url = CString::new(final_url).unwrap();
         let mut args = [cmd.as_ptr(), url.as_ptr(), ptr::null()];
         unsafe {
             mpv_command(mpv.get(), args.as_mut_ptr());

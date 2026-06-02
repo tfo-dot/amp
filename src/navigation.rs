@@ -155,7 +155,7 @@ pub async fn load_dashboard(
             let mut nu_list = Vec::new();
 
             for (p_id, item, buffer) in all_next_up {
-                nu_ids.push((p_id, item.id.clone()));
+                nu_ids.push((p_id.clone(), item.id.clone()));
                 nu_list.push(GridItem {
                     id: item.id.into(),
                     name: item.name.into(),
@@ -166,7 +166,13 @@ pub async fn load_dashboard(
                         item.index.unwrap_or(0)
                     )
                     .into(),
-                    meta: "".into(),
+                    meta: if p_id == "jellyfin" {
+                        "Jellyfin".into()
+                    } else if p_id == "animepahe" {
+                        "Animepahe".into()
+                    } else {
+                        p_id.clone().into()
+                    },
                     series_name: item.series_name.unwrap_or_default().into(),
                     is_folder: false,
                     index: item.index.unwrap_or(0),
