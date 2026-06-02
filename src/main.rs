@@ -419,13 +419,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .get_plugin(&id)
                 .map(|f| f.config_fields())
                 .unwrap_or_default();
+            let saved_config = pm.config.provider_configs.get(id.as_str());
             let slint_fields: Vec<ConfigFieldMetadata> = fields
                 .into_iter()
-                .map(|f| ConfigFieldMetadata {
-                    key: f.key.into(),
-                    label: f.label.into(),
-                    is_password: f.is_password,
-                    value: f.default_value.into(),
+                .map(|f| {
+                    let value = saved_config
+                        .and_then(|c| c.get(&f.key))
+                        .cloned()
+                        .unwrap_or_else(|| f.default_value.clone());
+                    ConfigFieldMetadata {
+                        key: f.key.into(),
+                        label: f.label.into(),
+                        is_password: f.is_password,
+                        value: value.into(),
+                    }
                 })
                 .collect();
             ui.set_config_fields(slint::ModelRc::from(std::rc::Rc::new(
