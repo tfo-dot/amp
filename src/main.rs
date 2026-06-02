@@ -766,20 +766,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let mpv_track = mpv.clone();
+    let ui_track = ui.as_weak();
     ui.on_select_audio_track(move |id| {
         let name = CString::new("aid").unwrap();
         let val = CString::new(id.to_string()).unwrap();
         unsafe {
             mpv_set_property_string(mpv_track.get(), name.as_ptr(), val.as_ptr());
+            if let Some(ui) = ui_track.upgrade() {
+                update_tracks(&ui, mpv_track.get());
+            }
         }
     });
 
     let mpv_sub = mpv.clone();
+    let ui_sub = ui.as_weak();
     ui.on_select_subtitle_track(move |id| {
         let name = CString::new("sid").unwrap();
         let val = CString::new(id.to_string()).unwrap();
         unsafe {
             mpv_set_property_string(mpv_sub.get(), name.as_ptr(), val.as_ptr());
+            if let Some(ui) = ui_sub.upgrade() {
+                update_tracks(&ui, mpv_sub.get());
+            }
         }
     });
 
@@ -947,7 +955,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             break;
                         }
 
-                        if (*ev).event_id == mpv_event_id_MPV_EVENT_TRACKS_CHANGED {
+                        if (*ev).event_id == mpv_event_id_MPV_EVENT_TRACKS_CHANGED
+                            || (*ev).event_id == mpv_event_id_MPV_EVENT_FILE_LOADED
+                        {
                             update_tracks(&ui, mpv_h.get());
                         }
                     }
@@ -1143,25 +1153,43 @@ unsafe fn update_tracks(ui: &PlayerWindow, mpv_h: *mut mpv_handle) {
     let tptr = unsafe { mpv_get_property_string(mpv_h, c_tracks.as_ptr()) };
     if !tptr.is_null() {
         let js = unsafe { CStr::from_ptr(tptr) }.to_string_lossy();
-        if let Ok(tracks) = serde_json::from_str::<Vec<Track>>(&js) {
-            let mut alist = Vec::new();
-            let mut slist = Vec::new();
+        match serde_json::from_str::<Vec<Track>>(&js) {
+            Ok(tracks) => {
+                let mut alist = Vec::new();
+                let mut slist = Vec::new();
+                let mut active_audio_name = "Default".to_string();
+                let mut active_sub_name = "None".to_string();
 
-            for t in &tracks {
-                match t.track_type {
-                    TrackType::Audio => alist.push(t.as_track_info()),
-                    TrackType::Sub => slist.push(t.as_track_info()),
-                    _ => (),
+                for t in &tracks {
+                    let track_info = t.as_track_info();
+                    if t.active {
+                        match t.track_type {
+                            TrackType::Audio => active_audio_name = track_info.name.to_string(),
+                            TrackType::Sub => active_sub_name = track_info.name.to_string(),
+                            _ => (),
+                        }
+                    }
+                    match t.track_type {
+                        TrackType::Audio => alist.push(track_info),
+                        TrackType::Sub => slist.push(track_info),
+                        _ => (),
+                    }
                 }
+
+                ui.set_audio_tracks(slint::ModelRc::from(std::rc::Rc::new(
+                    slint::VecModel::from(alist),
+                )));
+
+                ui.set_subtitle_tracks(slint::ModelRc::from(std::rc::Rc::new(
+                    slint::VecModel::from(slist),
+                )));
+
+                ui.set_audio_track_name(active_audio_name.into());
+                ui.set_subtitle_track_name(active_sub_name.into());
             }
-
-            ui.set_audio_tracks(slint::ModelRc::from(std::rc::Rc::new(
-                slint::VecModel::from(alist),
-            )));
-
-            ui.set_subtitle_tracks(slint::ModelRc::from(std::rc::Rc::new(
-                slint::VecModel::from(slist),
-            )));
+            Err(e) => {
+                eprintln!("[AMP] Error parsing tracks JSON: {:?}. JSON was: {}", e, js);
+            }
         }
         unsafe { mpv_free(tptr as *mut c_void) };
     }
@@ -1179,7 +1207,7 @@ struct Track {
     #[serde(default)]
     lang: Option<String>,
     #[serde(default)]
-    codec: String,
+    codec: Option<String>,
 }
 
 impl Track {
@@ -1193,10 +1221,9 @@ impl Track {
         TrackInfo {
             active: self.active,
             id: self.id,
-            name: if self.codec.is_empty() {
-                name.into()
-            } else {
-                format!("{} ({})", name, self.codec).into()
+            name: match &self.codec {
+                Some(c) if !c.is_empty() => format!("{} ({})", name, c).into(),
+                _ => name.into(),
             },
         }
     }
@@ -1208,6 +1235,8 @@ enum TrackType {
     Audio,
     Video,
     Sub,
+    #[serde(other)]
+    Other,
 }
 
 unsafe extern "C" fn get_proc_address_mpv(ctx: *mut c_void, name: *const c_char) -> *mut c_void {
