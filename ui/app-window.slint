@@ -92,6 +92,7 @@ export component PlayerWindow inherits Window {
     callback select_subtitle_track(int);
     callback select_provider(string);
     callback close_player();
+    callback change_speed(float);
     callback search(string);
     callback select_search_result(int);
 
@@ -128,6 +129,7 @@ export component PlayerWindow inherits Window {
     in property <[TrackInfo]> subtitle_tracks: [];
     in property <string> audio_track_name: "Default";
     in property <string> subtitle_track_name: "None";
+    in property <string> playback_speed: "1.00x";
 
     // Sizes exported to Rust
     out property <length> video_width: video_area.width;
@@ -504,6 +506,7 @@ export component PlayerWindow inherits Window {
             subtitle_tracks: root.subtitle_tracks;
             audio_track_name: root.audio_track_name;
             subtitle_track_name: root.subtitle_track_name;
+            playback_speed: root.playback_speed;
 
             has_next: root.has_next;
             has_previous: root.has_previous;
@@ -519,6 +522,7 @@ export component PlayerWindow inherits Window {
             select_audio_track(idx) => select_audio_track(idx);
             select_subtitle_track(idx) => select_subtitle_track(idx);
             close_player => close_player();
+            change_speed(s) => root.change_speed(s);
         }
     }
 

@@ -1,6 +1,7 @@
 import { Button, HorizontalBox, VerticalBox, Slider, ScrollView, LineEdit } from "std-widgets.slint";
 
 import { TrackSelector, TrackInfo } from "./trackselector.slint";
+import { SpeedSelector } from "./speedselector.slint";
 
 export component Player inherits Rectangle {
 	callback toggle_pause();
@@ -11,6 +12,7 @@ export component Player inherits Rectangle {
     callback select_audio_track(int);
     callback select_subtitle_track(int);
     callback close_player();
+    callback change_speed(float);
 
     callback next();
     callback previous();
@@ -26,6 +28,7 @@ export component Player inherits Rectangle {
     in property <string> time_pos: "00:00";
     in property <string> duration: "00:00";
     in property <bool> controls_visible: true;
+    in property <string> playback_speed: "1.00x";
 
     in property <bool> has_next;
     in property <bool> has_previous;
@@ -123,6 +126,12 @@ export component Player inherits Rectangle {
                     tracks: root.subtitle_tracks;
                     current_name: root.subtitle_track_name;
                     select_track(id) => { root.select_subtitle_track(id); }
+                }
+
+                SpeedSelector {
+                    label: "Speed:";
+                    current_speed_name: root.playback_speed;
+                    select_speed(speed) => { root.change_speed(speed); }
                 }
 
                 Rectangle { width: 40px; } // spacer

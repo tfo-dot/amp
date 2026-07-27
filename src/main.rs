@@ -798,6 +798,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let mpv_speed = mpv.clone();
+    let ui_speed = ui.as_weak();
+    ui.on_change_speed(move |speed| {
+        let name = CString::new("speed").unwrap();
+        let speed_val = speed as f64;
+        unsafe {
+            mpv_set_property(
+                mpv_speed.get(),
+                name.as_ptr(),
+                mpv_format_MPV_FORMAT_DOUBLE,
+                &speed_val as *const _ as *mut c_void,
+            );
+            if let Some(ui) = ui_speed.upgrade() {
+                ui.set_playback_speed(format!("{:.2}x", speed_val).into());
+            }
+        }
+    });
+
     let last_activity = Arc::new(Mutex::new(std::time::Instant::now()));
     let la_clone = last_activity.clone();
     ui.on_user_activity(move || {
@@ -935,6 +953,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let c_dur = CString::new("duration").unwrap();
     let c_perc = CString::new("percent-pos").unwrap();
     let c_pause = CString::new("pause").unwrap();
+    let c_speed = CString::new("speed").unwrap();
 
     let render_timer = slint::Timer::default();
     render_timer.start(
@@ -1015,6 +1034,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ) >= 0
                     {
                         ui.set_is_paused(paused != 0);
+                    }
+
+                    let mut speed: f64 = 1.0;
+                    if mpv_get_property(
+                        mpv_h.get(),
+                        c_speed.as_ptr(),
+                        mpv_format_MPV_FORMAT_DOUBLE,
+                        &mut speed as *mut _ as *mut c_void,
+                    ) >= 0
+                    {
+                        ui.set_playback_speed(format!("{:.2}x", speed).into());
                     }
 
                     if ui.get_current_screen() == "player" {
