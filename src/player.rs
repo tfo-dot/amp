@@ -124,13 +124,14 @@ pub async fn open_player(
         }
     }
 
-    let (has_prev, has_next) = {
+    let (has_prev, has_next, title) = {
         let state = state_arc.lock().unwrap();
-        if let Some((items, idx)) = state.active_playlist.as_ref() {
+        let (p, n) = if let Some((items, idx)) = state.active_playlist.as_ref() {
             (*idx > 0, *idx < items.len() - 1)
         } else {
             (false, false)
-        }
+        };
+        (p, n, state.current_title.clone())
     };
 
     let _ = slint::invoke_from_event_loop(move || {
@@ -171,6 +172,7 @@ pub async fn open_player(
 
         if let Some(ui) = ui_weak.upgrade() {
             ui.set_current_screen("player".into());
+            ui.set_video_title(title.into());
             ui.set_has_next(has_next);
             ui.set_has_previous(has_prev);
             ui.set_is_loading(false);

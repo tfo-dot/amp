@@ -1007,23 +1007,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     {
                         ui.set_progress(perc as f32);
                     }
-                    if mpv_get_property(
+                    let got_time = mpv_get_property(
                         mpv_h.get(),
                         c_time.as_ptr(),
                         mpv_format_MPV_FORMAT_DOUBLE,
                         &mut time as *mut _ as *mut c_void,
-                    ) >= 0
-                    {
+                    ) >= 0;
+                    if got_time {
                         ui.set_time_pos(format_time(time as i64).into());
                     }
-                    if mpv_get_property(
+                    let got_dur = mpv_get_property(
                         mpv_h.get(),
                         c_dur.as_ptr(),
                         mpv_format_MPV_FORMAT_INT64,
                         &mut dur as *mut _ as *mut c_void,
-                    ) >= 0
-                    {
+                    ) >= 0;
+                    if got_dur {
                         ui.set_duration(format_time(dur).into());
+                    }
+
+                    if got_time && got_dur {
+                        let remaining_secs = dur - time as i64;
+                        if remaining_secs >= 0 {
+                            ui.set_remaining_time(format!("-{}", format_time(remaining_secs)).into());
+                            let current_time = chrono::Local::now();
+                            if let Some(delta) = chrono::Duration::try_seconds(remaining_secs) {
+                                let end_time = current_time + delta;
+                                ui.set_ends_at(format!("ends at {}", end_time.format("%-I:%M %p")).into());
+                            } else {
+                                ui.set_ends_at("".into());
+                            }
+                        } else {
+                            ui.set_remaining_time("-00:00".into());
+                            ui.set_ends_at("".into());
+                        }
+                    } else {
+                        ui.set_remaining_time("-00:00".into());
+                        ui.set_ends_at("".into());
                     }
 
                     if mpv_get_property(

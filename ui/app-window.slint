@@ -130,13 +130,16 @@ export component PlayerWindow inherits Window {
     in property <string> audio_track_name: "Default";
     in property <string> subtitle_track_name: "None";
     in property <string> playback_speed: "1.00x";
+    in property <string> video_title: "";
+    in property <string> remaining_time: "-00:00";
+    in property <string> ends_at: "";
 
     // Sizes exported to Rust
     out property <length> video_width: video_area.width;
     out property <length> video_height: video_area.height;
 
-    HorizontalLayout {
-        if (root.current_screen != "player") : Rectangle {
+    if (root.current_screen != "player") : HorizontalLayout {
+        Rectangle {
             width: 80px;
             background: #151515;
             VerticalLayout {
@@ -491,8 +494,9 @@ export component PlayerWindow inherits Window {
                 }
             }
         }
+    }
 
-        video_area := Player {
+    video_area := Player {
             visible: root.current_screen == "player";
 
             video_frame: root.video_frame;
@@ -507,6 +511,9 @@ export component PlayerWindow inherits Window {
             audio_track_name: root.audio_track_name;
             subtitle_track_name: root.subtitle_track_name;
             playback_speed: root.playback_speed;
+            video_title: root.video_title;
+            remaining_time: root.remaining_time;
+            ends_at: root.ends_at;
 
             has_next: root.has_next;
             has_previous: root.has_previous;
@@ -524,7 +531,6 @@ export component PlayerWindow inherits Window {
             close_player => close_player();
             change_speed(s) => root.change_speed(s);
         }
-    }
 
     // Loading Overlay
     if (root.is_loading) : Rectangle {
