@@ -26,8 +26,9 @@ impl MpvHandle {
                 ("demuxer-max-bytes", "150M"),
                 ("demuxer-max-back-bytes", "75M"),
                 ("vd-lavc-threads", "0"),
-                ("terminal", "no"),
+                ("terminal", "yes"),
                 ("stop-screensaver", "yes"),
+                ("network-timeout", "10"),
             ];
 
             for (opt, val) in cache_opts {
@@ -70,9 +71,55 @@ impl MpvHandle {
     }
 }
 
+impl super::MediaSession for MpvHandle {
+    fn play(&mut self) {
+        let c_pause = CString::new("pause").unwrap();
+        let paused: std::os::raw::c_int = 0;
+        unsafe {
+            mpv_set_property(
+                self.get(),
+                c_pause.as_ptr(),
+                mpv_format_MPV_FORMAT_FLAG,
+                &paused as *const _ as *mut std::os::raw::c_void,
+            );
+        }
+    }
+
+    fn pause(&mut self) {
+        let c_pause = CString::new("pause").unwrap();
+        let paused: std::os::raw::c_int = 1;
+        unsafe {
+            mpv_set_property(
+                self.get(),
+                c_pause.as_ptr(),
+                mpv_format_MPV_FORMAT_FLAG,
+                &paused as *const _ as *mut std::os::raw::c_void,
+            );
+        }
+    }
+
+    fn seek(&mut self, time_ms: i64) {
+        let scmd = CString::new("seek").unwrap();
+        let secs = time_ms as f64 / 1000.0;
+        let sval = CString::new(secs.to_string()).unwrap();
+        let smode = CString::new("absolute").unwrap();
+        let mut sargs = [scmd.as_ptr(), sval.as_ptr(), smode.as_ptr(), ptr::null()];
+        unsafe {
+            mpv_command(self.get(), sargs.as_mut_ptr());
+        }
+    }
+
+    fn teardown(&mut self) {
+        let scmd = CString::new("stop").unwrap();
+        let mut sargs = [scmd.as_ptr(), ptr::null()];
+        unsafe {
+            mpv_command(self.get(), sargs.as_mut_ptr());
+        }
+    }
+}
+
 unsafe impl Send for MpvHandle {}
 unsafe impl Sync for MpvHandle {}
-
 #[derive(Clone)]
 pub struct MpvRenderCtx(pub *mut mpv_render_context);
 
@@ -86,7 +133,7 @@ unsafe impl Send for MpvRenderCtx {}
 unsafe impl Sync for MpvRenderCtx {}
 
 pub async fn open_player(
-    ui_weak: Weak<crate::PlayerWindow>,
+    ui_weak: Weak<crate::AppWindow>,
     state_arc: Arc<Mutex<AppState>>,
     mpv: MpvHandle,
 ) {
@@ -94,22 +141,28 @@ pub async fn open_player(
         let state = state_arc.lock().unwrap();
 
         if state.current_item_id.is_none() {
+            eprintln!("[AMP] open_player: current_item_id is None!");
             return;
         }
 
         let (provider_id, i_id) = state.current_item_id.clone().unwrap();
+        eprintln!("[AMP] open_player: Loading item '{}' with provider '{}'", i_id, provider_id);
 
         (state.active_providers.get(&provider_id).cloned(), i_id)
     };
 
     let provider = match provider {
         Some(p) => p,
-        None => return,
+        None => {
+            eprintln!("[AMP] open_player: Provider not found!");
+            return;
+        }
     };
 
     let resume_pos = provider.get_resume_position(&item_id).await.unwrap_or(None);
     let _ = provider.report_playback_start(&item_id).await;
     let stream_url = provider.get_stream_url(&item_id);
+    eprintln!("[AMP] open_player: Resolved stream URL: {}", stream_url);
 
     let mut referer: Option<String> = None;
     let mut final_url = stream_url.clone();
@@ -162,14 +215,21 @@ pub async fn open_player(
                 mpv_set_property_string(mpv.get(), c_start.as_ptr(), c_pos.as_ptr());
             }
         }
-
+        eprintln!("[AMP] MPV loading file: {}", final_url);
         let cmd = CString::new("loadfile").unwrap();
         let url = CString::new(final_url).unwrap();
         let mut args = [cmd.as_ptr(), url.as_ptr(), ptr::null()];
         unsafe {
             mpv_command(mpv.get(), args.as_mut_ptr());
+            let c_pause = CString::new("pause").unwrap();
+            let paused: std::os::raw::c_int = 0;
+            mpv_set_property(
+                mpv.get(),
+                c_pause.as_ptr(),
+                mpv_format_MPV_FORMAT_FLAG,
+                &paused as *const _ as *mut std::os::raw::c_void,
+            );
         }
-
         if let Some(ui) = ui_weak.upgrade() {
             ui.set_current_screen("player".into());
             ui.set_video_title(title.into());

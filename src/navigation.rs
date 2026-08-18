@@ -1,6 +1,6 @@
 use crate::app_state::AppState;
 use crate::image_cache::ImageCache;
-use crate::{GridItem, PlayerWindow};
+use crate::{GridItem, AppWindow};
 use amp_api::{AmpError, DynProvider, MediaItemType, RawImage};
 use slint::{Image, Model, SharedPixelBuffer, Weak};
 use std::sync::{Arc, Mutex};
@@ -30,7 +30,7 @@ pub async fn load_folder(
     p_id: String,
     folder_id: Option<String>,
     folder_name: String,
-    ui_weak: Weak<PlayerWindow>,
+    ui_weak: Weak<AppWindow>,
     state_arc: Arc<Mutex<AppState>>,
     cache: Arc<ImageCache>,
 ) -> Result<(), AmpError> {
@@ -117,7 +117,7 @@ pub async fn load_folder(
 
 pub async fn load_dashboard(
     state_arc: Arc<Mutex<AppState>>,
-    ui_weak: Weak<PlayerWindow>,
+    ui_weak: Weak<AppWindow>,
     cache: Arc<ImageCache>,
 ) -> Result<(), AmpError> {
     let providers = {
