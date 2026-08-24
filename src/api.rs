@@ -1,10 +1,52 @@
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum AmpError {
+    #[error("Plugin error: {0}")]
+    Plugin(String),
+
+    #[error("Reqwest error: {0}")]
+    Reqwest(#[from] reqwest::Error),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Serialization error: {0}")]
+    Serialization(#[from] serde_json::Error),
+
+    #[error("Authentication failed: {0}")]
+    Auth(String),
+
+    #[error("Provider error: {0}")]
+    Provider(String),
+
+    #[error("Unknown error: {0}")]
+    Unknown(String),
+}
+
+impl From<Box<dyn std::error::Error + Send + Sync>> for AmpError {
+    fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        AmpError::Unknown(e.to_string())
+    }
+}
+
+impl From<String> for AmpError {
+    fn from(s: String) -> Self {
+        AmpError::Unknown(s)
+    }
+}
+
+impl From<&str> for AmpError {
+    fn from(s: &str) -> Self {
+        AmpError::Unknown(s.to_string())
+    }
+}
+
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-
-pub mod error;
-pub use error::AmpError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MediaItemType {
@@ -46,6 +88,9 @@ pub trait MediaProvider: Send + Sync {
 
     fn get_stream_url(&self, item_id: &str) -> String;
     async fn get_item_image_buffer(&self, item_id: &str) -> Result<RawImage, AmpError>;
+
+    //It's used in /bridge and /extensions modules
+    #[allow(dead_code)]
     fn get_persistable_config(&self) -> HashMap<String, String>;
 
     async fn get_resume_position(&self, item_id: &str) -> Result<Option<i64>, AmpError>;
@@ -66,14 +111,6 @@ pub trait MediaProvider: Send + Sync {
 
 pub type DynProvider = Arc<dyn MediaProvider>;
 
-#[derive(Clone, Debug)]
-pub struct ConfigField {
-    pub key: String,
-    pub label: String,
-    pub is_password: bool,
-    pub default_value: String,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlaybackInfo {
     pub title: String,
@@ -89,7 +126,6 @@ pub struct PlaybackInfo {
 pub trait PlaybackExtension: Send + Sync {
     fn on_playback_update(&self, info: PlaybackInfo);
     fn on_playback_stop(&self);
-    fn set_controller(&self, _controller: Arc<dyn PlaybackController>) {}
 }
 
 pub trait PlaybackController: Send + Sync {
@@ -100,60 +136,4 @@ pub trait PlaybackController: Send + Sync {
     fn previous(&self);
     fn stop(&self);
     fn seek(&self, position_secs: i64);
-}
-
-#[async_trait]
-pub trait LibraryManager: Send + Sync {
-    async fn search_and_add_series(&self, title: &str) -> Result<(), AmpError>;
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub enum PluginCapability {
-    MediaProvider,
-    PlaybackExtension,
-    LibraryManager,
-}
-
-#[async_trait]
-pub trait AmpPlugin: Send + Sync {
-    fn id(&self) -> &'static str;
-    fn display_name(&self) -> &'static str;
-    fn capabilities(&self) -> Vec<PluginCapability>;
-
-    // Config fields for MediaProvider
-    fn config_fields(&self) -> Vec<ConfigField> {
-        vec![]
-    }
-
-    // Config fields for Extensions (AniList, Sonarr, etc)
-    fn extension_config_fields(&self) -> Vec<ConfigField> {
-        vec![]
-    }
-
-    async fn create_provider(
-        &self,
-        _config: HashMap<String, String>,
-    ) -> Result<DynProvider, AmpError> {
-        Err(AmpError::Plugin(
-            "MediaProvider capability not implemented".into(),
-        ))
-    }
-
-    async fn create_extension(
-        &self,
-        _config: HashMap<String, String>,
-    ) -> Result<Arc<dyn PlaybackExtension>, AmpError> {
-        Err(AmpError::Plugin(
-            "PlaybackExtension capability not implemented".into(),
-        ))
-    }
-
-    async fn create_library_manager(
-        &self,
-        _config: HashMap<String, String>,
-    ) -> Result<Arc<dyn LibraryManager>, AmpError> {
-        Err(AmpError::Plugin(
-            "LibraryManager capability not implemented".into(),
-        ))
-    }
 }

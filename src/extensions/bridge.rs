@@ -1,6 +1,6 @@
 #![allow(unused_imports, dead_code)]
 use super::ExtensionError;
-use amp_api::{AmpError, MediaItem, MediaItemType, MediaProvider, PlaybackController, PlaybackInfo, RawImage};
+use crate::api::{AmpError, MediaItem, MediaItemType, MediaProvider, PlaybackController, PlaybackInfo, RawImage};
 use async_trait::async_trait;
 use parts::engine::Engine;
 use parts::value::{parts_native, FromValue, IntoValue, Value};

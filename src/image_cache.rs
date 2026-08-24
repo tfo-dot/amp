@@ -1,4 +1,4 @@
-use amp_api::{DynProvider, RawImage};
+use crate::api::{DynProvider, RawImage};
 use directories::ProjectDirs;
 use std::fs;
 use std::path::PathBuf;

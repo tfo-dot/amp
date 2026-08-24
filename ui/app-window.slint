@@ -152,7 +152,6 @@ export component AppWindow inherits Window {
                 NavRectangle { current_screen <=> root.current_screen; name: "provider_select"; initial: "E"; }
             }
         }
-
         VerticalLayout {
             // --- -1. PROVIDER SELECT SCREEN ---
             if (root.current_screen == "provider_select") : VerticalLayout {
@@ -186,7 +185,7 @@ export component AppWindow inherits Window {
                 padding: 40px;
 
                 Text {
-                    text: "Connect to " + root.selected_provider_id;
+                    text: "Configure " + root.selected_provider_id;
                     font-size: 32px;
                     font-weight: 700;
                     color: white;
@@ -194,13 +193,15 @@ export component AppWindow inherits Window {
                 }
 
                 Rectangle {
-                    width: 450px;
+                    width: 480px;
                     background: #1a1a1a;
                     border-radius: 12px;
+                    border-width: 1px;
+                    border-color: #333;
 
                     VerticalLayout {
                         spacing: 20px;
-                        padding: 20px;
+                        padding: 24px;
 
                         for field[i] in root.config_fields : VerticalLayout {
                             spacing: 8px;
@@ -220,7 +221,7 @@ export component AppWindow inherits Window {
                         }
 
                         Button {
-                            text: "Connect";
+                            text: "Save & Apply";
                             primary: true;
                             enabled: !root.is_loading;
                             clicked => { root.login(root.selected_provider_id, root.config_fields); }

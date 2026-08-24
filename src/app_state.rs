@@ -1,4 +1,4 @@
-use amp_api::DynProvider;
+use crate::api::DynProvider;
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]

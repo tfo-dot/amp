@@ -1,15 +1,12 @@
 [package]
 name = "amp"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 
 authors = ["tfo-dot"]
-description = "A player for the anime"
+description = "A player for the brave"
 repository = "https://github.com/amp-dot/amp"
 license = "MIT"
-
-[package.metadata.aur]
-files = [["amp.desktop", "/usr/share/applications/amp.desktop"]]
 
 [dependencies]
 libmpv-sys = "3.1.0"
@@ -29,7 +26,6 @@ libloading = "0.9.0"
 urlencoding = "2.1.3"
 discord-rich-presence = "1.1.0"
 thiserror = "2.0.18"
-amp-api = { path = "./amp-api" }
 parts = { path = "../parts-rs" }
 rustc-hash = "2.1.3"
 tokio-tungstenite = "0.26.2"

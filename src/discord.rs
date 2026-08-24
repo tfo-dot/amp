@@ -1,4 +1,4 @@
-use amp_api::{PlaybackExtension, PlaybackInfo};
+use crate::api::{PlaybackExtension, PlaybackInfo};
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -136,6 +136,4 @@ impl PlaybackExtension for DiscordRPC {
             self.last_title.lock().unwrap().clear();
         }
     }
-
-    fn set_controller(&self, _controller: Arc<dyn amp_api::PlaybackController>) {}
 }

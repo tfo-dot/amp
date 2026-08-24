@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use super::{MediaMetadata, MediaProvider as AppMediaProvider};
 use crate::player::SessionError;
-use amp_api::{AmpError, MediaItem, MediaItemType, MediaProvider, RawImage};
+use crate::api::{AmpError, MediaItem, MediaItemType, MediaProvider, RawImage};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

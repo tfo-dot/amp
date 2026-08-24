@@ -1,7 +1,7 @@
 use crate::app_state::AppState;
 use crate::image_cache::ImageCache;
 use crate::{GridItem, AppWindow};
-use amp_api::{AmpError, DynProvider, MediaItemType, RawImage};
+use crate::api::{AmpError, DynProvider, MediaItemType, RawImage};
 use slint::{Image, Model, SharedPixelBuffer, Weak};
 use std::sync::{Arc, Mutex};
 

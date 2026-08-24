@@ -11,8 +11,9 @@ mod image_cache;
 mod navigation;
 mod player;
 mod ui;
+mod api;
 
-use amp_api::{MediaItemType, PlaybackExtension, PlaybackInfo};
+use crate::api::{MediaItemType, PlaybackExtension, PlaybackInfo};
 use app_state::{AppState, PlaylistItem};
 use backend::local::LocalProvider;
 use backend::seanime::{SeanimeClient, SeanimeProvider, SeanimeWsEvent, SeanimeWsListener};
@@ -38,7 +39,7 @@ struct AppPlaybackController {
     mpv: MpvHandle,
 }
 
-impl amp_api::PlaybackController for AppPlaybackController {
+impl crate::api::PlaybackController for AppPlaybackController {
     fn play(&self) {
         let c_pause = CString::new("pause").unwrap();
         let paused: c_int = 0;
@@ -110,6 +111,106 @@ impl amp_api::PlaybackController for AppPlaybackController {
             mpv_command(self.mpv.get(), sargs.as_mut_ptr());
         }
     }
+}
+
+async fn play_episode_with_series_playlist(
+    p_id: String,
+    item_id: String,
+    item_name: String,
+    series_name: String,
+    episode_index: i32,
+    season_index: i32,
+    prov: crate::api::DynProvider,
+    ui_weak: Weak<AppWindow>,
+    state_arc: Arc<Mutex<AppState>>,
+    mpv: MpvHandle,
+) {
+    let mut playlist_items = Vec::new();
+    let mut current_idx = 0;
+
+    // Check if we can load the full series playlist from the provider
+    if let Some(rest) = item_id.strip_prefix("ep_") {
+        let parts: Vec<&str> = rest.split('_').collect();
+        if parts.len() >= 2 {
+            let media_id = parts[0];
+            let folder_id = format!("media_{}", media_id);
+            if let Ok(children) = prov.get_children(&folder_id).await {
+                for (idx, child) in children.into_iter().enumerate() {
+                    if child.id == item_id {
+                        current_idx = idx;
+                    }
+                    playlist_items.push(PlaylistItem {
+                        p_id: p_id.clone(),
+                        item_id: child.id,
+                        name: child.name,
+                        series_name: child.series_name.unwrap_or_else(|| series_name.clone()),
+                        index: child.index.unwrap_or(0),
+                        season_index: child.season_index.unwrap_or(0),
+                    });
+                }
+            }
+        }
+    }
+
+    // Fallback if playlist is empty: check state.current_items_ids
+    if playlist_items.is_empty() {
+        let s = state_arc.lock().unwrap();
+        if let Some(ui) = ui_weak.upgrade() {
+            let model = ui.get_current_items();
+            for (i, id_pair) in s.current_items_ids.iter().enumerate() {
+                if let Some(it) = model.row_data(i) {
+                    if !it.is_folder {
+                        if id_pair.1 == item_id {
+                            current_idx = playlist_items.len();
+                        }
+                        playlist_items.push(PlaylistItem {
+                            p_id: id_pair.0.clone(),
+                            item_id: id_pair.1.clone(),
+                            name: it.name.to_string(),
+                            series_name: it.series_name.to_string(),
+                            index: it.index,
+                            season_index: it.season_index,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Final fallback
+    if playlist_items.is_empty() {
+        playlist_items.push(PlaylistItem {
+            p_id: p_id.clone(),
+            item_id: item_id.clone(),
+            name: item_name.clone(),
+            series_name: series_name.clone(),
+            index: episode_index,
+            season_index,
+        });
+    }
+
+    {
+        let mut s = state_arc.lock().unwrap();
+        s.active_playlist = Some((playlist_items, current_idx));
+        s.current_title = item_name;
+        s.current_artist = series_name.clone();
+        s.current_series_name = Some(series_name);
+        s.current_season_index = Some(season_index);
+        s.current_episode_index = Some(episode_index);
+        s.current_item_id = Some((p_id, item_id));
+    }
+
+    let _ = slint::invoke_from_event_loop({
+        let ui_weak = ui_weak.clone();
+        move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_is_loading(true);
+                ui.set_current_screen("player".into());
+            }
+        }
+    });
+
+    open_player(ui_weak, state_arc, mpv).await;
 }
 
 #[tokio::main]
@@ -504,57 +605,137 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             let mpv_h = mpv_search_sel.clone();
             let state_arc = state_search_sel.clone();
-            {
-                let mut s = state_arc.lock().unwrap();
-                s.current_title = item.name.to_string();
-                s.current_artist = item.series_name.to_string();
-                s.current_series_name = Some(item.series_name.to_string());
-                s.current_season_index = Some(item.season_index);
-                s.current_episode_index = Some(item.index);
-                s.current_item_id = Some((p_id, item_id));
-            }
-
-            ui.set_is_loading(true);
-            ui.set_current_screen("player".into());
             tokio::spawn(async move {
-                open_player(ui_weak, state_arc, mpv_h).await;
+                play_episode_with_series_playlist(
+                    p_id,
+                    item_id,
+                    item.name.to_string(),
+                    item.series_name.to_string(),
+                    item.index,
+                    item.season_index,
+                    prov,
+                    ui_weak,
+                    state_arc,
+                    mpv_h,
+                )
+                .await;
             });
         }
     });
 
-    // --- Provider Selection & Login ---
+    // --- Provider Selection & Configuration ---
     let ui_prov_select = ui.as_weak();
-    let state_prov = state.clone();
-    let cache_prov = cache.clone();
+    let seanime_c_prov = seanime_client.clone();
     ui.on_select_provider(move |id| {
-        if let Some(ui) = ui_prov_select.upgrade() {
-            ui.set_selected_provider_id(id.clone());
-            ui.set_current_screen("library".into());
-            ui.set_is_loading(true);
+        let Some(ui) = ui_prov_select.upgrade() else { return };
+        ui.set_selected_provider_id(id.clone());
+        ui.set_error_message("".into());
 
-            let ui_weak = ui_prov_select.clone();
-            let state_arc = state_prov.clone();
-            let cache_arc = cache_prov.clone();
-            let p_id = id.to_string();
+        let mut fields = Vec::new();
+        match id.as_str() {
+            "seanime" => {
+                fields.push(ConfigFieldMetadata {
+                    key: "server_url".into(),
+                    label: "Seanime Server URL".into(),
+                    is_password: false,
+                    value: seanime_c_prov.base_url().into(),
+                });
+            }
+            "parts" => {
+                let default_dir = extensions::bridge::get_parts_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "~/.config/amp/plugins/parts".to_string());
 
-            tokio::spawn(async move {
-                let prov = {
-                    let s = state_arc.lock().unwrap();
-                    s.active_providers.get(&p_id).cloned()
-                };
+                fields.push(ConfigFieldMetadata {
+                    key: "script_path".into(),
+                    label: "Parts Script Directory / Path".into(),
+                    is_password: false,
+                    value: default_dir.into(),
+                });
+            }
+            "local" => {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                let videos_dir = std::path::PathBuf::from(home).join("Videos");
 
-                if let Some(p) = prov {
-                    let _ = load_folder(p, p_id, None, "Library".into(), ui_weak, state_arc, cache_arc).await;
-                }
-            });
+                fields.push(ConfigFieldMetadata {
+                    key: "media_dir".into(),
+                    label: "Local Videos Directory".into(),
+                    is_password: false,
+                    value: videos_dir.to_string_lossy().to_string().into(),
+                });
+            }
+            _ => {
+                fields.push(ConfigFieldMetadata {
+                    key: "endpoint".into(),
+                    label: "Extension Endpoint".into(),
+                    is_password: false,
+                    value: "".into(),
+                });
+            }
         }
+
+        ui.set_config_fields(slint::ModelRc::from(std::rc::Rc::new(
+            slint::VecModel::from(fields),
+        )));
+        ui.set_current_screen("login".into());
     });
 
     let ui_login_cb = ui.as_weak();
-    ui.on_login(move |_provider_id, _fields| {
-        if let Some(ui) = ui_login_cb.upgrade() {
-            ui.set_current_screen("library".into());
+    let state_login = state.clone();
+    let cache_login = cache.clone();
+    let parts_bridge_login = parts_bridge.clone();
+    ui.on_login(move |provider_id, fields| {
+        let Some(ui) = ui_login_cb.upgrade() else { return };
+        let mut config = std::collections::HashMap::new();
+        for i in 0..fields.row_count() {
+            if let Some(field) = fields.row_data(i) {
+                config.insert(field.key.to_string(), field.value.to_string());
+            }
         }
+
+        ui.set_is_loading(true);
+        let ui_weak = ui_login_cb.clone();
+        let state_arc = state_login.clone();
+        let cache_arc = cache_login.clone();
+        let p_bridge = parts_bridge_login.clone();
+        let p_id = provider_id.to_string();
+
+        tokio::spawn(async move {
+            match p_id.as_str() {
+                "seanime" => {
+                    let server_url = config
+                        .get("server_url")
+                        .cloned()
+                        .unwrap_or_else(|| "http://192.168.1.250:3211".to_string());
+                    let new_client = Arc::new(SeanimeClient::new(server_url));
+                    let new_provider = Arc::new(SeanimeProvider::new(new_client.clone()));
+                    {
+                        let mut s = state_arc.lock().unwrap();
+                        s.active_providers.insert("seanime".to_string(), new_provider);
+                    }
+                }
+                "parts" => {
+                    let _ = p_bridge.load_scripts();
+                }
+                "local" => {
+                    if let Some(dir) = config.get("media_dir") {
+                        let new_local = Arc::new(LocalProvider::with_dir(dir.clone()));
+                        let mut s = state_arc.lock().unwrap();
+                        s.active_providers.insert("local".to_string(), new_local);
+                    }
+                }
+                _ => {}
+            }
+
+            let _ = load_dashboard(state_arc, ui_weak.clone(), cache_arc).await;
+
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_current_screen("library".into());
+                    ui.set_is_loading(false);
+                }
+            });
+        });
     });
 
     // --- Item Selection Callbacks ---
@@ -604,39 +785,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ui_weak = ui_nav.clone();
             let state_arc = state_nav.clone();
 
-            let mut playlist_items = Vec::new();
-            {
-                let s = state_arc.lock().unwrap();
-                for (i, id_pair) in s.current_items_ids.iter().enumerate() {
-                    if let Some(it) = ui.get_current_items().row_data(i) {
-                        playlist_items.push(PlaylistItem {
-                            p_id: id_pair.0.clone(),
-                            item_id: id_pair.1.clone(),
-                            name: it.name.to_string(),
-                            series_name: it.series_name.to_string(),
-                            index: it.index,
-                            season_index: it.season_index,
-                        });
-                    }
-                }
-            }
-
-            {
-                let mut s = state_arc.lock().unwrap();
-                s.active_playlist = Some((playlist_items, index as usize));
-                s.current_title = item.name.to_string();
-                s.current_artist = item.series_name.to_string();
-                s.current_series_name = Some(item.series_name.to_string());
-                s.current_season_index = Some(item.season_index);
-                s.current_episode_index = Some(item.index);
-                s.current_item_id = Some((p_id, item_id));
-            }
-
-            ui.set_is_loading(true);
-            ui.set_current_screen("player".into());
-
             tokio::spawn(async move {
-                open_player(ui_weak, state_arc, mpv_h).await;
+                play_episode_with_series_playlist(
+                    p_id,
+                    item_id,
+                    item.name.to_string(),
+                    item.series_name.to_string(),
+                    item.index,
+                    item.season_index,
+                    prov,
+                    ui_weak,
+                    state_arc,
+                    mpv_h,
+                )
+                .await;
             });
         }
     });
@@ -653,39 +815,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(ui) = ui_nu.upgrade() else { return };
         let Some(item) = ui.get_next_up_list().row_data(index as usize) else { return };
 
-        {
-            let mut s = state_nu.lock().unwrap();
-            s.current_title = item.name.to_string();
-            s.current_artist = item.series_name.to_string();
-
-            let mut playlist_items = Vec::new();
-            for (i, id_pair) in s.next_up_ids.iter().enumerate() {
-                if let Some(it) = ui.get_next_up_list().row_data(i) {
-                    playlist_items.push(PlaylistItem {
-                        p_id: id_pair.0.clone(),
-                        item_id: id_pair.1.clone(),
-                        name: it.name.to_string(),
-                        series_name: it.series_name.to_string(),
-                        index: it.index,
-                        season_index: it.season_index,
-                    });
-                }
-            }
-            s.active_playlist = Some((playlist_items, index as usize));
-            s.current_series_name = Some(item.series_name.to_string());
-            s.current_season_index = Some(item.season_index);
-            s.current_episode_index = Some(item.index);
-            s.current_item_id = Some((p_id, item_id));
-        }
-
-        ui.set_is_loading(true);
-        ui.set_current_screen("player".into());
+        let prov = {
+            let s = state_nu.lock().unwrap();
+            let Some(p) = s.active_providers.get(&p_id).cloned() else { return };
+            p
+        };
 
         let mpv_h = mpv_nu.clone();
         let ui_weak = ui_nu.clone();
         let state_arc = state_nu.clone();
 
-        tokio::spawn(async move { open_player(ui_weak, state_arc, mpv_h).await });
+        tokio::spawn(async move {
+            play_episode_with_series_playlist(
+                p_id,
+                item_id,
+                item.name.to_string(),
+                item.series_name.to_string(),
+                item.index,
+                item.season_index,
+                prov,
+                ui_weak,
+                state_arc,
+                mpv_h,
+            )
+            .await;
+        });
     });
 
     let ui_back = ui.as_weak();
@@ -959,14 +1113,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     });
 
-    // --- 16ms Rendering & State Timer ---
     let ui_render = ui.as_weak();
     let mpv_r = mpv_render.clone();
     let mpv_h = mpv.clone();
     let state_timer = state.clone();
     let bridge_timer = parts_bridge.clone();
     let discord_timer = discord.clone();
-
+    let seanime_prov_timer = seanime_provider.clone();
     let last_report = Arc::new(Mutex::new(std::time::Instant::now()));
     let last_ext_update = Arc::new(Mutex::new(std::time::Instant::now()));
 
@@ -1048,10 +1201,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &mut dur as *mut _ as *mut c_void,
                     ) >= 0;
 
-                    if got_dur {
+                    if got_dur && dur > 0 {
                         ui.set_duration(format_time(dur).into());
+                        if let Ok(s) = state_arc.lock() {
+                            if let Some((p_id, item_id)) = s.current_item_id.as_ref() {
+                                if p_id == "seanime" {
+                                    seanime_prov_timer.set_item_duration(item_id, dur as f64);
+                                }
+                            }
+                        }
                     }
-
                     if got_time && got_dur {
                         let remaining_secs = dur - time as i64;
                         if remaining_secs >= 0 {

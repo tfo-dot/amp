@@ -3,7 +3,7 @@ pub mod bridge;
 pub mod watcher;
 
 pub use bridge::{ExtensionBridge, PartsExtensionBridge};
-pub use amp_api::PlaybackController;
+pub use crate::api::PlaybackController;
 pub use watcher::ExtensionWatcher;
 
 use thiserror::Error;
