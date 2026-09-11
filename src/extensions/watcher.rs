@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
@@ -41,12 +41,12 @@ impl ExtensionWatcher {
                 if let Ok(entries) = std::fs::read_dir(dir) {
                     for entry in entries.flatten() {
                         let path = entry.path();
-                        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("pts") {
-                            if let Ok(meta) = std::fs::metadata(&path) {
-                                if let Ok(mtime) = meta.modified() {
-                                    file_mtimes.insert(path, mtime);
-                                }
-                            }
+                        if path.is_file()
+                            && path.extension().and_then(|s| s.to_str()) == Some("pts")
+                            && let Ok(meta) = std::fs::metadata(&path)
+                            && let Ok(mtime) = meta.modified()
+                        {
+                            file_mtimes.insert(path, mtime);
                         }
                     }
                 }
@@ -59,21 +59,24 @@ impl ExtensionWatcher {
                     if let Ok(entries) = std::fs::read_dir(dir) {
                         for entry in entries.flatten() {
                             let path = entry.path();
-                            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("pts") {
-                                if let Ok(meta) = std::fs::metadata(&path) {
-                                    if let Ok(mtime) = meta.modified() {
-                                        let is_changed = match file_mtimes.get(&path) {
-                                            Some(&prev_time) => mtime > prev_time,
-                                            None => true,
-                                        };
+                            if path.is_file()
+                                && path.extension().and_then(|s| s.to_str()) == Some("pts")
+                                && let Ok(meta) = std::fs::metadata(&path)
+                                && let Ok(mtime) = meta.modified()
+                            {
+                                let is_changed = match file_mtimes.get(&path) {
+                                    Some(&prev_time) => mtime > prev_time,
+                                    None => true,
+                                };
 
-                                        if is_changed {
-                                            file_mtimes.insert(path.clone(), mtime);
-                                            let path_str = path.to_string_lossy().to_string();
-                                            eprintln!("[ExtensionWatcher] Detected change in script: {}", path_str);
-                                            on_change(path_str);
-                                        }
-                                    }
+                                if is_changed {
+                                    file_mtimes.insert(path.clone(), mtime);
+                                    let path_str = path.to_string_lossy().to_string();
+                                    eprintln!(
+                                        "[ExtensionWatcher] Detected change in script: {}",
+                                        path_str
+                                    );
+                                    on_change(path_str);
                                 }
                             }
                         }

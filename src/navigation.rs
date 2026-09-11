@@ -1,7 +1,7 @@
+use crate::api::{AmpError, DynProvider, MediaItemType, RawImage};
 use crate::app_state::AppState;
 use crate::image_cache::ImageCache;
-use crate::{GridItem, AppWindow};
-use crate::api::{AmpError, DynProvider, MediaItemType, RawImage};
+use crate::{AppWindow, GridItem};
 use slint::{Image, Model, SharedPixelBuffer, Weak};
 use std::sync::{Arc, Mutex};
 
@@ -110,7 +110,7 @@ pub async fn load_folder(
         })
         .buffer_unordered(4);
 
-    while let Some(_) = stream.next().await {}
+    while stream.next().await.is_some() {}
 
     Ok(())
 }

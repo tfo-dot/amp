@@ -42,7 +42,6 @@ impl From<&str> for AmpError {
     }
 }
 
-
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

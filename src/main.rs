@@ -2,6 +2,7 @@
 
 slint::include_modules!();
 
+mod api;
 mod app;
 mod app_state;
 mod backend;
@@ -11,7 +12,6 @@ mod image_cache;
 mod navigation;
 mod player;
 mod ui;
-mod api;
 
 use crate::api::{MediaItemType, PlaybackExtension, PlaybackInfo};
 use app_state::{AppState, PlaylistItem};
@@ -23,7 +23,7 @@ use glow::HasContext;
 use image_cache::ImageCache;
 use libmpv_sys::*;
 use navigation::{format_time, image_from_raw, load_dashboard, load_folder};
-use player::{configure_hardware_acceleration, open_player, GLResources, MpvHandle, MpvRenderCtx};
+use player::{GLResources, MpvHandle, MpvRenderCtx, configure_hardware_acceleration, open_player};
 use slint::{
     BorrowedOpenGLTextureBuilder, BorrowedOpenGLTextureOrigin, ComponentHandle, Model, Weak,
 };
@@ -113,14 +113,13 @@ impl crate::api::PlaybackController for AppPlaybackController {
     }
 }
 
+//Prov is (id, provider), position: (series, ep)
 async fn play_episode_with_series_playlist(
-    p_id: String,
+    prov: (String, crate::api::DynProvider),
     item_id: String,
     item_name: String,
     series_name: String,
-    episode_index: i32,
-    season_index: i32,
-    prov: crate::api::DynProvider,
+    position: (i32, i32),
     ui_weak: Weak<AppWindow>,
     state_arc: Arc<Mutex<AppState>>,
     mpv: MpvHandle,
@@ -134,13 +133,13 @@ async fn play_episode_with_series_playlist(
         if parts.len() >= 2 {
             let media_id = parts[0];
             let folder_id = format!("media_{}", media_id);
-            if let Ok(children) = prov.get_children(&folder_id).await {
+            if let Ok(children) = prov.1.get_children(&folder_id).await {
                 for (idx, child) in children.into_iter().enumerate() {
                     if child.id == item_id {
                         current_idx = idx;
                     }
                     playlist_items.push(PlaylistItem {
-                        p_id: p_id.clone(),
+                        p_id: prov.0.clone(),
                         item_id: child.id,
                         name: child.name,
                         series_name: child.series_name.unwrap_or_else(|| series_name.clone()),
@@ -158,20 +157,20 @@ async fn play_episode_with_series_playlist(
         if let Some(ui) = ui_weak.upgrade() {
             let model = ui.get_current_items();
             for (i, id_pair) in s.current_items_ids.iter().enumerate() {
-                if let Some(it) = model.row_data(i) {
-                    if !it.is_folder {
-                        if id_pair.1 == item_id {
-                            current_idx = playlist_items.len();
-                        }
-                        playlist_items.push(PlaylistItem {
-                            p_id: id_pair.0.clone(),
-                            item_id: id_pair.1.clone(),
-                            name: it.name.to_string(),
-                            series_name: it.series_name.to_string(),
-                            index: it.index,
-                            season_index: it.season_index,
-                        });
+                if let Some(it) = model.row_data(i)
+                    && !it.is_folder
+                {
+                    if id_pair.1 == item_id {
+                        current_idx = playlist_items.len();
                     }
+                    playlist_items.push(PlaylistItem {
+                        p_id: id_pair.0.clone(),
+                        item_id: id_pair.1.clone(),
+                        name: it.name.to_string(),
+                        series_name: it.series_name.to_string(),
+                        index: it.index,
+                        season_index: it.season_index,
+                    });
                 }
             }
         }
@@ -180,12 +179,12 @@ async fn play_episode_with_series_playlist(
     // Final fallback
     if playlist_items.is_empty() {
         playlist_items.push(PlaylistItem {
-            p_id: p_id.clone(),
+            p_id: prov.0.clone(),
             item_id: item_id.clone(),
             name: item_name.clone(),
             series_name: series_name.clone(),
-            index: episode_index,
-            season_index,
+            season_index: position.0,
+            index: position.1,
         });
     }
 
@@ -195,9 +194,9 @@ async fn play_episode_with_series_playlist(
         s.current_title = item_name;
         s.current_artist = series_name.clone();
         s.current_series_name = Some(series_name);
-        s.current_season_index = Some(season_index);
-        s.current_episode_index = Some(episode_index);
-        s.current_item_id = Some((p_id, item_id));
+        s.current_season_index = Some(position.0);
+        s.current_episode_index = Some(position.1);
+        s.current_item_id = Some((prov.0, item_id));
     }
 
     let _ = slint::invoke_from_event_loop({
@@ -308,12 +307,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let state_arc = state_ws.clone();
                     let cache_arc = cache_ws.clone();
                     let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = ui_weak.upgrade() {
-                            if ui.get_current_screen() == "library" {
-                                tokio::spawn(async move {
-                                    let _ = load_dashboard(state_arc, ui_weak, cache_arc).await;
-                                });
-                            }
+                        if let Some(ui) = ui_weak.upgrade()
+                            && ui.get_current_screen() == "library"
+                        {
+                            tokio::spawn(async move {
+                                let _ = load_dashboard(state_arc, ui_weak, cache_arc).await;
+                            });
                         }
                     });
                 }
@@ -382,88 +381,87 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 slint::RenderingState::BeforeRendering => {
-                    if let Some(render_ctx) = mpv_r.borrow().as_ref() {
-                        if let Some(ui) = ui_weak.upgrade() {
-                            let sf = ui.window().scale_factor();
-                            let raw_w = (ui.get_video_width() * sf) as u32;
-                            let raw_h = (ui.get_video_height() * sf) as u32;
+                    if let Some(render_ctx) = mpv_r.borrow().as_ref()
+                        && let Some(ui) = ui_weak.upgrade()
+                    {
+                        let sf = ui.window().scale_factor();
+                        let raw_w = (ui.get_video_width() * sf) as u32;
+                        let raw_h = (ui.get_video_height() * sf) as u32;
 
-                            // Ensure even dimensions for planar color conversion & alignment
-                            let width = ((raw_w + 1) & !1).max(2);
-                            let height = ((raw_h + 1) & !1).max(2);
+                        // Ensure even dimensions for planar color conversion & alignment
+                        let width = ((raw_w + 1) & !1).max(2);
+                        let height = ((raw_h + 1) & !1).max(2);
 
-                            if width > 0 && height > 0 {
-                                let mut res_lock = gl_res.borrow_mut();
-                                if res_lock
-                                    .as_ref()
-                                    .map_or(true, |r| r.width != width || r.height != height)
-                                {
-                                    if let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = api {
-                                        let gl = unsafe {
-                                            glow::Context::from_loader_function(|s| {
-                                                match CString::new(s) {
-                                                    Ok(name) => get_proc_address(&name) as *const _,
-                                                    _ => std::ptr::null(),
-                                                }
-                                            })
-                                        };
-                                        *res_lock = Some(GLResources::new(gl, width, height));
+                        if width > 0 && height > 0 {
+                            let mut res_lock = gl_res.borrow_mut();
+                            if res_lock
+                                .as_ref()
+                                .is_none_or(|r| r.width != width || r.height != height)
+                                && let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = api
+                            {
+                                let gl = unsafe {
+                                    glow::Context::from_loader_function(|s| match CString::new(s) {
+                                        Ok(name) => get_proc_address(&name) as *const _,
+                                        _ => std::ptr::null(),
+                                    })
+                                };
+                                *res_lock = Some(GLResources::new(gl, width, height));
+                            }
+
+                            if let Some(res) = res_lock.as_ref() {
+                                let mut fbo = mpv_opengl_fbo {
+                                    fbo: res.fbo.0.get() as i32,
+                                    w: width as i32,
+                                    h: height as i32,
+                                    internal_format: 0x8058, // GL_RGBA8
+                                };
+
+                                let mut params = [
+                                    mpv_render_param {
+                                        type_: mpv_render_param_type_MPV_RENDER_PARAM_OPENGL_FBO,
+                                        data: &mut fbo as *mut _ as *mut c_void,
+                                    },
+                                    mpv_render_param {
+                                        type_:
+                                            mpv_render_param_type_MPV_RENDER_PARAM_ADVANCED_CONTROL,
+                                        data: &mut 1 as *mut _ as *mut c_void,
+                                    },
+                                    mpv_render_param {
+                                        type_: 0,
+                                        data: ptr::null_mut(),
+                                    },
+                                ];
+
+                                unsafe {
+                                    // Reset OpenGL state that Slint's Femtovg renderer may have left behind
+                                    res.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(res.fbo));
+                                    res.gl.viewport(0, 0, width as i32, height as i32);
+                                    res.gl.disable(glow::SCISSOR_TEST);
+                                    res.gl.disable(glow::DEPTH_TEST);
+                                    res.gl.disable(glow::STENCIL_TEST);
+                                    res.gl.disable(glow::CULL_FACE);
+                                    res.gl.disable(glow::BLEND);
+                                    res.gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                                    res.gl.clear(glow::COLOR_BUFFER_BIT);
+
+                                    let res_render = mpv_render_context_render(
+                                        render_ctx.get(),
+                                        params.as_mut_ptr(),
+                                    );
+                                    if res_render < 0 {
+                                        eprintln!("[AMP] Render error: {}", res_render);
                                     }
-                                }
 
-                                if let Some(res) = res_lock.as_ref() {
-                                    let mut fbo = mpv_opengl_fbo {
-                                        fbo: res.fbo.0.get() as i32,
-                                        w: width as i32,
-                                        h: height as i32,
-                                        internal_format: 0x8058, // GL_RGBA8
-                                    };
+                                    res.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
 
-                                    let mut params = [
-                                        mpv_render_param {
-                                            type_: mpv_render_param_type_MPV_RENDER_PARAM_OPENGL_FBO,
-                                            data: &mut fbo as *mut _ as *mut c_void,
-                                        },
-                                        mpv_render_param {
-                                            type_: mpv_render_param_type_MPV_RENDER_PARAM_ADVANCED_CONTROL,
-                                            data: &mut 1 as *mut _ as *mut c_void,
-                                        },
-                                        mpv_render_param {
-                                            type_: 0,
-                                            data: ptr::null_mut(),
-                                        },
-                                    ];
-
-                                    unsafe {
-                                        // Reset OpenGL state that Slint's Femtovg renderer may have left behind
-                                        res.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(res.fbo));
-                                        res.gl.viewport(0, 0, width as i32, height as i32);
-                                        res.gl.disable(glow::SCISSOR_TEST);
-                                        res.gl.disable(glow::DEPTH_TEST);
-                                        res.gl.disable(glow::STENCIL_TEST);
-                                        res.gl.disable(glow::CULL_FACE);
-                                        res.gl.disable(glow::BLEND);
-                                        res.gl.clear_color(0.0, 0.0, 0.0, 1.0);
-                                        res.gl.clear(glow::COLOR_BUFFER_BIT);
-
-                                        let res_render = mpv_render_context_render(
-                                            render_ctx.get(),
-                                            params.as_mut_ptr(),
-                                        );
-                                        if res_render < 0 {
-                                            eprintln!("[AMP] Render error: {}", res_render);
-                                        }
-
-                                        res.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-
-                                        let image = BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(
+                                    let image =
+                                        BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(
                                             std::num::NonZeroU32::new(res.texture.0.get()).unwrap(),
                                             [width, height].into(),
                                         )
                                         .origin(BorrowedOpenGLTextureOrigin::TopLeft)
                                         .build();
-                                        ui.set_video_frame(image);
-                                    }
+                                    ui.set_video_frame(image);
                                 }
                             }
                         }
@@ -607,13 +605,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let state_arc = state_search_sel.clone();
             tokio::spawn(async move {
                 play_episode_with_series_playlist(
-                    p_id,
+                    (p_id, prov),
                     item_id,
                     item.name.to_string(),
                     item.series_name.to_string(),
-                    item.index,
-                    item.season_index,
-                    prov,
+                    (item.season_index, item.index),
                     ui_weak,
                     state_arc,
                     mpv_h,
@@ -627,7 +623,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui_prov_select = ui.as_weak();
     let seanime_c_prov = seanime_client.clone();
     ui.on_select_provider(move |id| {
-        let Some(ui) = ui_prov_select.upgrade() else { return };
+        let Some(ui) = ui_prov_select.upgrade() else {
+            return;
+        };
         ui.set_selected_provider_id(id.clone());
         ui.set_error_message("".into());
 
@@ -685,7 +683,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cache_login = cache.clone();
     let parts_bridge_login = parts_bridge.clone();
     ui.on_login(move |provider_id, fields| {
-        let Some(ui) = ui_login_cb.upgrade() else { return };
+        let Some(ui) = ui_login_cb.upgrade() else {
+            return;
+        };
         let mut config = std::collections::HashMap::new();
         for i in 0..fields.row_count() {
             if let Some(field) = fields.row_data(i) {
@@ -711,7 +711,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let new_provider = Arc::new(SeanimeProvider::new(new_client.clone()));
                     {
                         let mut s = state_arc.lock().unwrap();
-                        s.active_providers.insert("seanime".to_string(), new_provider);
+                        s.active_providers
+                            .insert("seanime".to_string(), new_provider);
                     }
                 }
                 "parts" => {
@@ -747,15 +748,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let Some(ui) = ui_nav.upgrade() else { return };
         let (p_id, item_id) = {
             let s = state_nav.lock().unwrap();
-            let Some(pair) = s.current_items_ids.get(index as usize).cloned() else { return };
+            let Some(pair) = s.current_items_ids.get(index as usize).cloned() else {
+                return;
+            };
             pair
         };
         let prov = {
             let s = state_nav.lock().unwrap();
-            let Some(p) = s.active_providers.get(&p_id).cloned() else { return };
+            let Some(p) = s.active_providers.get(&p_id).cloned() else {
+                return;
+            };
             p
         };
-        let Some(item) = ui.get_current_items().row_data(index as usize) else { return };
+        let Some(item) = ui.get_current_items().row_data(index as usize) else {
+            return;
+        };
 
         if item.is_folder {
             ui.set_is_loading(true);
@@ -787,13 +794,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             tokio::spawn(async move {
                 play_episode_with_series_playlist(
-                    p_id,
+                    (p_id, prov),
                     item_id,
                     item.name.to_string(),
                     item.series_name.to_string(),
-                    item.index,
-                    item.season_index,
-                    prov,
+                    (item.season_index, item.index),
                     ui_weak,
                     state_arc,
                     mpv_h,
@@ -809,15 +814,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_select_next_up(move |index| {
         let (p_id, item_id) = {
             let s = state_nu.lock().unwrap();
-            let Some(pair) = s.next_up_ids.get(index as usize).cloned() else { return };
+            let Some(pair) = s.next_up_ids.get(index as usize).cloned() else {
+                return;
+            };
             pair
         };
         let Some(ui) = ui_nu.upgrade() else { return };
-        let Some(item) = ui.get_next_up_list().row_data(index as usize) else { return };
+        let Some(item) = ui.get_next_up_list().row_data(index as usize) else {
+            return;
+        };
 
         let prov = {
             let s = state_nu.lock().unwrap();
-            let Some(p) = s.active_providers.get(&p_id).cloned() else { return };
+            let Some(p) = s.active_providers.get(&p_id).cloned() else {
+                return;
+            };
             p
         };
 
@@ -827,13 +838,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         tokio::spawn(async move {
             play_episode_with_series_playlist(
-                p_id,
+                (p_id, prov),
                 item_id,
                 item.name.to_string(),
                 item.series_name.to_string(),
-                item.index,
-                item.season_index,
-                prov,
+                (item.season_index, item.index),
                 ui_weak,
                 state_arc,
                 mpv_h,
@@ -940,7 +949,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if fid.is_none() {
                         let _ = load_dashboard(state_arc, ui_weak, cache_arc).await;
                     } else {
-                        let _ = load_folder(p_clone, p_id, fid, pname, ui_weak, state_arc, cache_arc).await;
+                        let _ =
+                            load_folder(p_clone, p_id, fid, pname, ui_weak, state_arc, cache_arc)
+                                .await;
                     }
                 });
             }
@@ -952,12 +963,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_mark_as_played(move |index, played| {
         let (p_id, item_id) = {
             let s = state_mark.lock().unwrap();
-            let Some(pair) = s.current_items_ids.get(index as usize).cloned() else { return };
+            let Some(pair) = s.current_items_ids.get(index as usize).cloned() else {
+                return;
+            };
             pair
         };
         let prov = {
             let s = state_mark.lock().unwrap();
-            let Some(p) = s.active_providers.get(&p_id).cloned() else { return };
+            let Some(p) = s.active_providers.get(&p_id).cloned() else {
+                return;
+            };
             p
         };
         tokio::spawn(async move {
@@ -1063,7 +1078,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_next(move || {
         {
             let mut s = state_next.lock().unwrap();
-            let Some((items, idx)) = s.active_playlist.as_mut() else { return };
+            let Some((items, idx)) = s.active_playlist.as_mut() else {
+                return;
+            };
             if *idx + 1 >= items.len() {
                 return;
             }
@@ -1091,7 +1108,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_previous(move || {
         {
             let mut s = state_prev.lock().unwrap();
-            let Some((items, idx)) = s.active_playlist.as_mut() else { return };
+            let Some((items, idx)) = s.active_playlist.as_mut() else {
+                return;
+            };
             if *idx == 0 {
                 return;
             }
@@ -1162,10 +1181,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    if let Some(rctx) = mpv_r.borrow().as_ref() {
-                        if (mpv_render_context_update(rctx.get()) & 1) != 0 {
-                            ui.window().request_redraw();
-                        }
+                    if let Some(rctx) = mpv_r.borrow().as_ref()
+                        && (mpv_render_context_update(rctx.get()) & 1) != 0
+                    {
+                        ui.window().request_redraw();
                     }
 
                     let mut time: f64 = 0.0;
@@ -1203,22 +1222,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if got_dur && dur > 0 {
                         ui.set_duration(format_time(dur).into());
-                        if let Ok(s) = state_arc.lock() {
-                            if let Some((p_id, item_id)) = s.current_item_id.as_ref() {
-                                if p_id == "seanime" {
-                                    seanime_prov_timer.set_item_duration(item_id, dur as f64);
-                                }
-                            }
+                        if let Ok(s) = state_arc.lock()
+                            && let Some((p_id, item_id)) = s.current_item_id.as_ref()
+                            && p_id == "seanime"
+                        {
+                            seanime_prov_timer.set_item_duration(item_id, dur as f64);
                         }
                     }
                     if got_time && got_dur {
                         let remaining_secs = dur - time as i64;
                         if remaining_secs >= 0 {
-                            ui.set_remaining_time(format!("-{}", format_time(remaining_secs)).into());
+                            ui.set_remaining_time(
+                                format!("-{}", format_time(remaining_secs)).into(),
+                            );
                             let current_time = chrono::Local::now();
                             if let Some(delta) = chrono::Duration::try_seconds(remaining_secs) {
                                 let end_time = current_time + delta;
-                                ui.set_ends_at(format!("ends at {}", end_time.format("%-I:%M %p")).into());
+                                ui.set_ends_at(
+                                    format!("ends at {}", end_time.format("%-I:%M %p")).into(),
+                                );
                             } else {
                                 ui.set_ends_at("".into());
                             }
@@ -1255,68 +1277,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Extension updates & Discord RPC
                     let is_in_player = ui.get_current_screen() == "player";
                     if is_in_player {
-                        if let Ok(mut last) = last_ext_update.lock() {
-                            if last.elapsed() >= std::time::Duration::from_millis(500) {
-                                *last = std::time::Instant::now();
+                        if let Ok(mut last) = last_ext_update.lock()
+                            && last.elapsed() >= std::time::Duration::from_millis(500)
+                        {
+                            *last = std::time::Instant::now();
 
-                                let time_ms = (time * 1000.0) as i64;
-                                extensions::bridge::ExtensionBridge::notify_time_update(&*bridge_timer, time_ms);
-                                extensions::bridge::ExtensionBridge::notify_state_changed(
-                                    &*bridge_timer,
-                                    if paused != 0 { 0 } else { 1 },
-                                );
+                            let time_ms = (time * 1000.0) as i64;
+                            extensions::bridge::ExtensionBridge::notify_time_update(
+                                &*bridge_timer,
+                                time_ms,
+                            );
+                            extensions::bridge::ExtensionBridge::notify_state_changed(
+                                &*bridge_timer,
+                                if paused != 0 { 0 } else { 1 },
+                            );
 
-                                let info = {
-                                    let s = state_arc.lock().unwrap();
-                                    PlaybackInfo {
-                                        title: s.current_title.clone(),
-                                        artist: s.current_artist.clone(),
-                                        series_name: s.current_series_name.clone(),
-                                        season_index: s.current_season_index,
-                                        episode_index: s.current_episode_index,
-                                        is_paused: paused != 0,
-                                        position_secs: time as i64,
-                                        duration_secs: dur,
-                                    }
-                                };
-                                bridge_timer.notify_playback_update(info.clone());
-                                discord_timer.on_playback_update(info);
-                            }
+                            let info = {
+                                let s = state_arc.lock().unwrap();
+                                PlaybackInfo {
+                                    title: s.current_title.clone(),
+                                    artist: s.current_artist.clone(),
+                                    series_name: s.current_series_name.clone(),
+                                    season_index: s.current_season_index,
+                                    episode_index: s.current_episode_index,
+                                    is_paused: paused != 0,
+                                    position_secs: time as i64,
+                                    duration_secs: dur,
+                                }
+                            };
+                            bridge_timer.notify_playback_update(info.clone());
+                            discord_timer.on_playback_update(info);
                         }
                     } else {
-                        if let Ok(mut last) = last_ext_update.lock() {
-                            if last.elapsed() >= std::time::Duration::from_secs(1) {
-                                *last = std::time::Instant::now();
-                                discord_timer.on_playback_stop();
-                            }
+                        if let Ok(mut last) = last_ext_update.lock()
+                            && last.elapsed() >= std::time::Duration::from_secs(1)
+                        {
+                            *last = std::time::Instant::now();
+                            discord_timer.on_playback_stop();
                         }
                     }
 
                     // Periodic Progress Sync to Providers (every 1 second)
-                    if is_in_player && got_time && time > 0.0 {
-                        if let Ok(mut last) = last_report.lock() {
-                            if last.elapsed() >= std::time::Duration::from_secs(1) {
-                                *last = std::time::Instant::now();
+                    if is_in_player
+                        && got_time
+                        && time > 0.0
+                        && let Ok(mut last) = last_report.lock()
+                        && last.elapsed() >= std::time::Duration::from_secs(1)
+                    {
+                        *last = std::time::Instant::now();
 
-                                let report_data = {
-                                    let s = state_arc.lock().unwrap();
-                                    s.current_item_id.as_ref().and_then(|(p_id, id)| {
-                                        s.active_providers
-                                            .get(p_id)
-                                            .map(|p| (p.clone(), id.clone(), p_id.clone()))
-                                    })
-                                };
+                        let report_data = {
+                            let s = state_arc.lock().unwrap();
+                            s.current_item_id.as_ref().and_then(|(p_id, id)| {
+                                s.active_providers
+                                    .get(p_id)
+                                    .map(|p| (p.clone(), id.clone(), p_id.clone()))
+                            })
+                        };
 
-                                if let Some((provider, item_id, _p_id)) = report_data {
-                                    let time_i64 = time as i64;
-                                    let is_p = paused != 0;
-                                    tokio::spawn(async move {
-                                        let _ = provider
-                                            .report_playback_progress(&item_id, time_i64, is_p)
-                                            .await;
-                                    });
-                                }
-                            }
+                        if let Some((provider, item_id, _p_id)) = report_data {
+                            let time_i64 = time as i64;
+                            let is_p = paused != 0;
+                            tokio::spawn(async move {
+                                let _ = provider
+                                    .report_playback_progress(&item_id, time_i64, is_p)
+                                    .await;
+                            });
                         }
                     }
                 }

@@ -1,9 +1,11 @@
 #![allow(unused_imports, dead_code)]
 use super::ExtensionError;
-use crate::api::{AmpError, MediaItem, MediaItemType, MediaProvider, PlaybackController, PlaybackInfo, RawImage};
+use crate::api::{
+    AmpError, MediaItem, MediaItemType, MediaProvider, PlaybackController, PlaybackInfo, RawImage,
+};
 use async_trait::async_trait;
 use parts::engine::Engine;
-use parts::value::{parts_native, FromValue, IntoValue, Value};
+use parts::value::{FromValue, IntoValue, Value, parts_native};
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -21,8 +23,9 @@ static PLAYBACK_CONTROLLER: LazyLock<Mutex<Option<Arc<dyn PlaybackController>>>>
 static UI_SLOT_DISPATCHER: LazyLock<Mutex<Option<Arc<dyn Fn(i64, i64) + Send + Sync>>>> =
     LazyLock::new(|| Mutex::new(None));
 // Global VM command dispatcher
-static VM_COMMAND_DISPATCHER: LazyLock<Mutex<Option<Arc<dyn Fn(i64, i64) -> Result<(), String> + Send + Sync>>>> =
-    LazyLock::new(|| Mutex::new(None));
+static VM_COMMAND_DISPATCHER: LazyLock<
+    Mutex<Option<Arc<dyn Fn(i64, i64) -> Result<(), String> + Send + Sync>>>,
+> = LazyLock::new(|| Mutex::new(None));
 thread_local! {
     static CONFIG: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
@@ -212,8 +215,8 @@ pub fn json_to_parts(v: &serde_json::Value) -> Value {
         serde_json::Value::Object(obj) => {
             let mut map = FxHashMap::default();
             for (k, val) in obj {
-                let hash_key = if k.starts_with("h_") {
-                    k[2..]
+                let hash_key = if let Some(stripped) = k.strip_prefix("h_") {
+                    stripped
                         .parse::<u64>()
                         .unwrap_or_else(|_| Value::String(k.clone().into()).get_hash())
                 } else {
@@ -445,51 +448,58 @@ fn parts_get_config(key: String) -> Result<String, String> {
 
 #[parts_native]
 fn parts_vm_command(cmd: i64, arg: i64) -> Result<bool, String> {
-    if let Ok(guard) = VM_COMMAND_DISPATCHER.lock() {
-        if let Some(handler) = guard.as_ref() {
-            handler(cmd, arg)?;
-            return Ok(true);
-        }
+    if let Ok(guard) = VM_COMMAND_DISPATCHER.lock()
+        && let Some(handler) = guard.as_ref()
+    {
+        handler(cmd, arg)?;
+        return Ok(true);
     }
     // Fallback directly to controller commands
     match cmd {
-        1 => { // Play
+        1 => {
+            // Play
             if let Some(ctrl) = get_controller() {
                 ctrl.play();
                 return Ok(true);
             }
         }
-        2 => { // Pause
+        2 => {
+            // Pause
             if let Some(ctrl) = get_controller() {
                 ctrl.pause();
                 return Ok(true);
             }
         }
-        3 => { // Toggle pause
+        3 => {
+            // Toggle pause
             if let Some(ctrl) = get_controller() {
                 ctrl.toggle_pause();
                 return Ok(true);
             }
         }
-        4 => { // Seek (arg in seconds or ms)
+        4 => {
+            // Seek (arg in seconds or ms)
             if let Some(ctrl) = get_controller() {
                 ctrl.seek(arg);
                 return Ok(true);
             }
         }
-        5 => { // Stop
+        5 => {
+            // Stop
             if let Some(ctrl) = get_controller() {
                 ctrl.stop();
                 return Ok(true);
             }
         }
-        6 => { // Next
+        6 => {
+            // Next
             if let Some(ctrl) = get_controller() {
                 ctrl.next();
                 return Ok(true);
             }
         }
-        7 => { // Previous
+        7 => {
+            // Previous
             if let Some(ctrl) = get_controller() {
                 ctrl.previous();
                 return Ok(true);
@@ -502,11 +512,11 @@ fn parts_vm_command(cmd: i64, arg: i64) -> Result<bool, String> {
 
 #[parts_native]
 fn parts_mutate_ui_slot(slot_id: i64, data_ptr: i64) -> Result<bool, String> {
-    if let Ok(guard) = UI_SLOT_DISPATCHER.lock() {
-        if let Some(handler) = guard.as_ref() {
-            handler(slot_id, data_ptr);
-            return Ok(true);
-        }
+    if let Ok(guard) = UI_SLOT_DISPATCHER.lock()
+        && let Some(handler) = guard.as_ref()
+    {
+        handler(slot_id, data_ptr);
+        return Ok(true);
     }
     Ok(false)
 }
@@ -683,7 +693,8 @@ fn spawn_script_worker(
         let run_res = match engine.run(&source) {
             Ok(res) => res,
             Err(e) => {
-                let _ = init_tx_clone.send(Err(AmpError::Plugin(format!("Script run error: {}", e))));
+                let _ =
+                    init_tx_clone.send(Err(AmpError::Plugin(format!("Script run error: {}", e))));
                 return;
             }
         };
@@ -691,7 +702,8 @@ fn spawn_script_worker(
         let script_obj = match run_res.value {
             Some(val) => val,
             None => {
-                let _ = init_tx_clone.send(Err(AmpError::Plugin("Script returned no value".into())));
+                let _ =
+                    init_tx_clone.send(Err(AmpError::Plugin("Script returned no value".into())));
                 return;
             }
         };
@@ -811,7 +823,8 @@ fn spawn_script_worker(
                 }
                 ScriptRequest::OnPlaybackStop => {
                     if has_method(&script_obj, "on_playback_stop") {
-                        let _ = call_parts_method(&script_obj, "on_playback_stop", vec![], &constants);
+                        let _ =
+                            call_parts_method(&script_obj, "on_playback_stop", vec![], &constants);
                     }
                 }
                 ScriptRequest::GetRoot { resp_tx } => {
@@ -970,15 +983,16 @@ pub fn get_parts_dir() -> Option<PathBuf> {
 
 pub fn discover_parts_scripts() -> Vec<(String, PathBuf)> {
     let mut scripts = Vec::new();
-    if let Some(dir) = get_parts_dir() {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("pts") {
-                    if let Some(name) = path.file_stem().and_then(|s| s.to_str()) {
-                        scripts.push((name.to_string(), path));
-                    }
-                }
+    if let Some(dir) = get_parts_dir()
+        && let Ok(entries) = std::fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file()
+                && path.extension().and_then(|s| s.to_str()) == Some("pts")
+                && let Some(name) = path.file_stem().and_then(|s| s.to_str())
+            {
+                scripts.push((name.to_string(), path));
             }
         }
     }
@@ -1055,7 +1069,9 @@ impl PartsExtensionBridge {
     pub fn notify_playback_update(&self, info: PlaybackInfo) {
         let scripts = self.scripts.read().unwrap().clone();
         for script in scripts {
-            let _ = script.tx.send(ScriptRequest::OnPlaybackUpdate(info.clone()));
+            let _ = script
+                .tx
+                .send(ScriptRequest::OnPlaybackUpdate(info.clone()));
         }
     }
 
@@ -1096,20 +1112,19 @@ impl ExtensionBridge for PartsExtensionBridge {
                 .tx
                 .send(ScriptRequest::VmCommand { cmd, arg, resp_tx })
                 .is_ok()
+                && let Ok(Err(e)) = resp_rx.recv()
             {
-                if let Ok(Err(e)) = resp_rx.recv() {
-                    return Err(ExtensionError::VmError(e));
-                }
+                return Err(ExtensionError::VmError(e));
             }
         }
         Ok(())
     }
 
     fn mutate_ui_slot(&self, slot_id: i64, data_ptr: i64) {
-        if let Ok(guard) = UI_SLOT_DISPATCHER.lock() {
-            if let Some(handler) = guard.as_ref() {
-                handler(slot_id, data_ptr);
-            }
+        if let Ok(guard) = UI_SLOT_DISPATCHER.lock()
+            && let Some(handler) = guard.as_ref()
+        {
+            handler(slot_id, data_ptr);
         }
     }
 
@@ -1125,7 +1140,10 @@ impl ExtensionBridge for PartsExtensionBridge {
             .unwrap_or("script")
             .to_string();
 
-        eprintln!("[PartsBridge] Hot-reloading extension script: {} ({})", name, script_path);
+        eprintln!(
+            "[PartsBridge] Hot-reloading extension script: {} ({})",
+            name, script_path
+        );
         self.load_single_script(&name, path)
     }
 }
@@ -1138,14 +1156,14 @@ impl MediaProvider for PartsExtensionBridge {
         let mut all_items = Vec::new();
         for script in scripts {
             let (resp_tx, resp_rx) = std::sync::mpsc::channel();
-            if script.tx.send(ScriptRequest::GetRoot { resp_tx }).is_ok() {
-                if let Ok(Ok(items)) = resp_rx.recv() {
-                    for mut item in items {
-                        if script.name != "fallback" {
-                            item.id = format!("{}::{}", script.name, item.id);
-                        }
-                        all_items.push(item);
+            if script.tx.send(ScriptRequest::GetRoot { resp_tx }).is_ok()
+                && let Ok(Ok(items)) = resp_rx.recv()
+            {
+                for mut item in items {
+                    if script.name != "fallback" {
+                        item.id = format!("{}::{}", script.name, item.id);
                     }
+                    all_items.push(item);
                 }
             }
         }
@@ -1173,20 +1191,19 @@ impl MediaProvider for PartsExtensionBridge {
                     resp_tx,
                 })
                 .is_ok()
+                && let Ok(res) = resp_rx.recv()
             {
-                if let Ok(res) = resp_rx.recv() {
-                    return res.map(|items| {
-                        items
-                            .into_iter()
-                            .map(|mut item| {
-                                if script.name != "fallback" {
-                                    item.id = format!("{}::{}", script.name, item.id);
-                                }
-                                item
-                            })
-                            .collect()
-                    });
-                }
+                return res.map(|items| {
+                    items
+                        .into_iter()
+                        .map(|mut item| {
+                            if script.name != "fallback" {
+                                item.id = format!("{}::{}", script.name, item.id);
+                            }
+                            item
+                        })
+                        .collect()
+                });
             }
         }
         Ok(Vec::new())
@@ -1197,14 +1214,14 @@ impl MediaProvider for PartsExtensionBridge {
         let mut all_items = Vec::new();
         for script in scripts {
             let (resp_tx, resp_rx) = std::sync::mpsc::channel();
-            if script.tx.send(ScriptRequest::GetNextUp { resp_tx }).is_ok() {
-                if let Ok(Ok(items)) = resp_rx.recv() {
-                    for mut item in items {
-                        if script.name != "fallback" {
-                            item.id = format!("{}::{}", script.name, item.id);
-                        }
-                        all_items.push(item);
+            if script.tx.send(ScriptRequest::GetNextUp { resp_tx }).is_ok()
+                && let Ok(Ok(items)) = resp_rx.recv()
+            {
+                for mut item in items {
+                    if script.name != "fallback" {
+                        item.id = format!("{}::{}", script.name, item.id);
                     }
+                    all_items.push(item);
                 }
             }
         }
@@ -1223,14 +1240,13 @@ impl MediaProvider for PartsExtensionBridge {
                     resp_tx,
                 })
                 .is_ok()
+                && let Ok(Ok(items)) = resp_rx.recv()
             {
-                if let Ok(Ok(items)) = resp_rx.recv() {
-                    for mut item in items {
-                        if script.name != "fallback" {
-                            item.id = format!("{}::{}", script.name, item.id);
-                        }
-                        all_items.push(item);
+                for mut item in items {
+                    if script.name != "fallback" {
+                        item.id = format!("{}::{}", script.name, item.id);
                     }
+                    all_items.push(item);
                 }
             }
         }
@@ -1258,12 +1274,10 @@ impl MediaProvider for PartsExtensionBridge {
                     resp_tx,
                 })
                 .is_ok()
+                && let Ok(url) = resp_rx.recv()
+                && !url.is_empty()
             {
-                if let Ok(url) = resp_rx.recv() {
-                    if !url.is_empty() {
-                        return url;
-                    }
-                }
+                return url;
             }
         }
         String::new()
@@ -1290,10 +1304,9 @@ impl MediaProvider for PartsExtensionBridge {
                     resp_tx,
                 })
                 .is_ok()
+                && let Ok(res) = resp_rx.recv()
             {
-                if let Ok(res) = resp_rx.recv() {
-                    return res;
-                }
+                return res;
             }
         }
         Err(AmpError::Provider("Image buffer not available".into()))
@@ -1324,10 +1337,9 @@ impl MediaProvider for PartsExtensionBridge {
                     resp_tx,
                 })
                 .is_ok()
+                && let Ok(res) = resp_rx.recv()
             {
-                if let Ok(res) = resp_rx.recv() {
-                    return res;
-                }
+                return res;
             }
         }
         Ok(None)
@@ -1524,29 +1536,38 @@ mod tests {
 
         let mut bridge = PartsExtensionBridge::new();
         let load_res = bridge.load_single_script("test_bridge", script_file.clone());
-        assert!(load_res.is_ok(), "Failed to load script: {:?}", load_res.err());
+        assert!(
+            load_res.is_ok(),
+            "Failed to load script: {:?}",
+            load_res.err()
+        );
 
         // 1. Test fast time updates (zero-allocation hot path)
         bridge.notify_time_update(12345);
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let time_val = parts_get_state(vec![Value::String("last_time_ms".to_string().into())]).unwrap();
+        let time_val =
+            parts_get_state(&[Value::String("last_time_ms".to_string().into())]).unwrap();
         assert_eq!(time_val, Value::Int(12345));
 
         // 2. Test state changes
         bridge.notify_state_changed(1);
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let state_val = parts_get_state(vec![Value::String("last_state".to_string().into())]).unwrap();
+        let state_val =
+            parts_get_state(&[Value::String("last_state".to_string().into())]).unwrap();
         assert_eq!(state_val, Value::Int(1));
 
-        let play_hook = parts_get_state(vec![Value::String("play_hook_called".to_string().into())]).unwrap();
+        let play_hook =
+            parts_get_state(&[Value::String("play_hook_called".to_string().into())]).unwrap();
         assert_eq!(play_hook, Value::Bool(true));
         // 3. Test VM command dispatch
         let cmd_res = bridge.vm_command(42, 9999);
         assert!(cmd_res.is_ok());
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        let last_cmd = parts_get_state(vec![Value::String("last_vm_cmd".to_string().into())]).unwrap();
-        let last_arg = parts_get_state(vec![Value::String("last_vm_arg".to_string().into())]).unwrap();
+        let last_cmd =
+            parts_get_state(&[Value::String("last_vm_cmd".to_string().into())]).unwrap();
+        let last_arg =
+            parts_get_state(&[Value::String("last_vm_arg".to_string().into())]).unwrap();
         assert_eq!(last_cmd, Value::Int(42));
         assert_eq!(last_arg, Value::Int(9999));
 
@@ -1574,12 +1595,17 @@ mod tests {
         "#;
         std::fs::write(&script_file, new_content).unwrap();
         let reload_res = bridge.hot_reload(&script_file.to_string_lossy());
-        assert!(reload_res.is_ok(), "Hot reload failed: {:?}", reload_res.err());
+        assert!(
+            reload_res.is_ok(),
+            "Hot reload failed: {:?}",
+            reload_res.err()
+        );
 
         bridge.notify_time_update(100);
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        let reloaded_time = parts_get_state(vec![Value::String("last_time_ms".to_string().into())]).unwrap();
+        let reloaded_time =
+            parts_get_state(&[Value::String("last_time_ms".to_string().into())]).unwrap();
         assert_eq!(reloaded_time, Value::Int(200));
 
         let _ = std::fs::remove_file(script_file);

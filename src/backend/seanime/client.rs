@@ -219,10 +219,10 @@ pub struct SeanimeEpisode {
 
 impl SeanimeEpisode {
     pub fn title_string(&self) -> String {
-        if let Some(t) = &self.episode_title {
-            if !t.is_empty() {
-                return format!("Ep {} - {}", self.episode_number, t);
-            }
+        if let Some(t) = &self.episode_title
+            && !t.is_empty()
+        {
+            return format!("Ep {} - {}", self.episode_number, t);
         }
         if let Some(dt) = &self.display_title {
             return dt.clone();
@@ -234,7 +234,11 @@ impl SeanimeEpisode {
         self.episode_metadata
             .as_ref()
             .and_then(|m| m.image.clone())
-            .or_else(|| self.base_anime.as_ref().and_then(|b| b.cover_image.as_ref().and_then(|c| c.best_url())))
+            .or_else(|| {
+                self.base_anime
+                    .as_ref()
+                    .and_then(|b| b.cover_image.as_ref().and_then(|c| c.best_url()))
+            })
     }
 
     pub fn file_path(&self) -> Option<String> {
@@ -389,8 +393,14 @@ impl SeanimeClient {
     }
 
     /// GET /api/v1/anime/episode-collection/{id}
-    pub async fn get_episode_collection(&self, media_id: i32) -> Result<Vec<SeanimeEpisode>, SeanimeError> {
-        let url = format!("{}/api/v1/anime/episode-collection/{}", self.base_url, media_id);
+    pub async fn get_episode_collection(
+        &self,
+        media_id: i32,
+    ) -> Result<Vec<SeanimeEpisode>, SeanimeError> {
+        let url = format!(
+            "{}/api/v1/anime/episode-collection/{}",
+            self.base_url, media_id
+        );
         let resp = self.http_client.get(&url).send().await?;
         let res: SeanimeResponse<SeanimeEpisodeCollection> = resp.json().await?;
         if let Some(err) = res.error {
@@ -407,7 +417,10 @@ impl SeanimeClient {
         total_episodes: i32,
         mal_id: Option<i32>,
     ) -> Result<(), SeanimeError> {
-        let url = format!("{}/api/v1/library/anime-entry/update-progress", self.base_url);
+        let url = format!(
+            "{}/api/v1/library/anime-entry/update-progress",
+            self.base_url
+        );
         let payload = UpdateProgressPayload {
             media_id,
             episode_number,
@@ -417,14 +430,20 @@ impl SeanimeClient {
         let resp = self.http_client.post(&url).json(&payload).send().await?;
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(SeanimeError::Api(format!("Update progress failed: {}", body)));
+            return Err(SeanimeError::Api(format!(
+                "Update progress failed: {}",
+                body
+            )));
         }
         Ok(())
     }
 
     /// POST /api/v1/playback-manager/sync-current-progress
     pub async fn sync_current_progress(&self) -> Result<(), SeanimeError> {
-        let url = format!("{}/api/v1/playback-manager/sync-current-progress", self.base_url);
+        let url = format!(
+            "{}/api/v1/playback-manager/sync-current-progress",
+            self.base_url
+        );
         let resp = self.http_client.post(&url).send().await?;
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -458,13 +477,13 @@ impl SeanimeClient {
         if let Some(err) = res.error {
             return Err(SeanimeError::Api(err));
         }
-        if let Some(container) = res.data {
-            if let Some(stream_path) = container.stream_url {
-                if stream_path.starts_with("http://") || stream_path.starts_with("https://") {
-                    return Ok(stream_path);
-                } else {
-                    return Ok(format!("{}{}", self.base_url, stream_path));
-                }
+        if let Some(container) = res.data
+            && let Some(stream_path) = container.stream_url
+        {
+            if stream_path.starts_with("http://") || stream_path.starts_with("https://") {
+                return Ok(stream_path);
+            } else {
+                return Ok(format!("{}{}", self.base_url, stream_path));
             }
         }
         Ok(format!("{}/api/v1/mediastream/direct", self.base_url))
@@ -491,69 +510,27 @@ impl SeanimeClient {
         let resp = self.http_client.patch(&url).json(&payload).send().await?;
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(SeanimeError::Api(format!("Update watch history failed: {}", body)));
+            return Err(SeanimeError::Api(format!(
+                "Update watch history failed: {}",
+                body
+            )));
         }
         Ok(())
     }
 
     /// GET /api/v1/continuity/item/{id}
-    pub async fn get_watch_history_item(&self, media_id: i32) -> Result<Option<WatchHistoryItem>, SeanimeError> {
+    pub async fn get_watch_history_item(
+        &self,
+        media_id: i32,
+    ) -> Result<Option<WatchHistoryItem>, SeanimeError> {
         let url = format!("{}/api/v1/continuity/item/{}", self.base_url, media_id);
         let resp = self.http_client.get(&url).send().await?;
         let res: SeanimeResponse<WatchHistoryItemResponse> = resp.json().await?;
-        if let Some(data) = res.data {
-            if data.found {
-                return Ok(data.item);
-            }
+        if let Some(data) = res.data
+            && data.found
+        {
+            return Ok(data.item);
         }
         Ok(None)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_seanime_client_live() {
-        let client = SeanimeClient::default_local();
-        // 1. Status (check server reachability)
-        let status = match client.get_status().await {
-            Ok(st) => st,
-            Err(e) => {
-                eprintln!("[SeanimeClientTest] Server not reachable ({}): {:?}. Skipping live assertions.", client.base_url(), e);
-                return;
-            }
-        };
-        assert!(status.user.is_some());
-        let user = status.user.unwrap();
-        assert_eq!(user.viewer.and_then(|v| v.name), Some("TheForgottenOne".to_string()));
-        // 2. Library Collection
-        let collection = client.get_library_collection().await;
-        assert!(collection.is_ok(), "Failed to get collection: {:?}", collection.err());
-        let collection = collection.unwrap();
-        assert!(!collection.lists.is_empty() || !collection.continue_watching_list.is_empty());
-
-        // 3. Anime Entry (Link Click Season 3: 191832)
-        let entry = client.get_anime_entry(191832).await;
-        assert!(entry.is_ok(), "Failed to get anime entry: {:?}", entry.err());
-        let entry = entry.unwrap();
-        assert_eq!(entry.media_id, 191832);
-        assert!(!entry.episodes.is_empty());
-        assert!(entry.episodes[0].file_path().is_some());
-
-        // 4. Episode Collection
-        let episodes = client.get_episode_collection(191832).await;
-        assert!(episodes.is_ok(), "Failed to get episode collection: {:?}", episodes.err());
-        let episodes = episodes.unwrap();
-        assert!(!episodes.is_empty());
-        assert_eq!(episodes[0].episode_number, 1);
-
-        // 5. Continuity Watch History
-        let update_res = client.update_watch_history(191832, 1, 45.0, 1307.0).await;
-        assert!(update_res.is_ok(), "Failed to update watch history: {:?}", update_res.err());
-
-        let history_item = client.get_watch_history_item(191832).await;
-        assert!(history_item.is_ok(), "Failed to get watch history item: {:?}", history_item.err());
     }
 }

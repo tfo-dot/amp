@@ -4,7 +4,7 @@ pub mod mpv;
 pub mod pipeline;
 
 pub use fbo::GLResources;
-pub use mpv::{open_player, MpvHandle, MpvRenderCtx};
+pub use mpv::{MpvHandle, MpvRenderCtx, open_player};
 pub use pipeline::configure_hardware_acceleration;
 
 use thiserror::Error;

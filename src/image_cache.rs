@@ -45,7 +45,11 @@ impl ImageCache {
     pub fn save_image(&self, id: &str, raw: &RawImage) {
         let path = self.get_path(id);
 
-        if let Some(rgba_img) = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(raw.width, raw.height, raw.rgba8.clone()) {
+        if let Some(rgba_img) = image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(
+            raw.width,
+            raw.height,
+            raw.rgba8.clone(),
+        ) {
             let rgb_img = image::DynamicImage::ImageRgba8(rgba_img).to_rgb8();
             let _ = image::save_buffer_with_format(
                 path,
@@ -59,12 +63,12 @@ impl ImageCache {
     }
 
     pub async fn get_or_fetch(&self, id: &str, client: DynProvider) -> Option<RawImage> {
-        if let Some(cached) = self.get_image(&id) {
+        if let Some(cached) = self.get_image(id) {
             Some(cached)
         } else {
-            let res = client.get_item_image_buffer(&id).await.ok();
+            let res = client.get_item_image_buffer(id).await.ok();
             if let Some(ref b) = res {
-                self.save_image(&id, b);
+                self.save_image(id, b);
             }
             res
         }

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use super::{MediaMetadata, MediaProvider as AppMediaProvider};
-use crate::player::SessionError;
 use crate::api::{AmpError, MediaItem, MediaItemType, MediaProvider, RawImage};
+use crate::player::SessionError;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -65,39 +65,39 @@ impl AppMediaProvider for LocalProvider {
 impl MediaProvider for LocalProvider {
     async fn get_root(&self) -> Result<Vec<MediaItem>, AmpError> {
         let mut items = Vec::new();
-        if self.media_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&self.media_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let name = path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("Unknown")
-                        .to_string();
+        if self.media_dir.exists()
+            && let Ok(entries) = std::fs::read_dir(&self.media_dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
 
-                    if path.is_dir() {
-                        items.push(MediaItem {
-                            id: path.to_string_lossy().to_string(),
-                            name,
-                            item_type: MediaItemType::Folder,
-                            duration_secs: None,
-                            index: None,
-                            resume_position_secs: None,
-                            series_name: None,
-                            season_index: None,
-                        });
-                    } else if is_video_file(&path) {
-                        items.push(MediaItem {
-                            id: path.to_string_lossy().to_string(),
-                            name,
-                            item_type: MediaItemType::Playable,
-                            duration_secs: None,
-                            index: None,
-                            resume_position_secs: None,
-                            series_name: Some("Local Videos".to_string()),
-                            season_index: None,
-                        });
-                    }
+                if path.is_dir() {
+                    items.push(MediaItem {
+                        id: path.to_string_lossy().to_string(),
+                        name,
+                        item_type: MediaItemType::Folder,
+                        duration_secs: None,
+                        index: None,
+                        resume_position_secs: None,
+                        series_name: None,
+                        season_index: None,
+                    });
+                } else if is_video_file(&path) {
+                    items.push(MediaItem {
+                        id: path.to_string_lossy().to_string(),
+                        name,
+                        item_type: MediaItemType::Playable,
+                        duration_secs: None,
+                        index: None,
+                        resume_position_secs: None,
+                        series_name: Some("Local Videos".to_string()),
+                        season_index: None,
+                    });
                 }
             }
         }
@@ -107,39 +107,45 @@ impl MediaProvider for LocalProvider {
     async fn get_children(&self, parent_id: &str) -> Result<Vec<MediaItem>, AmpError> {
         let dir = PathBuf::from(parent_id);
         let mut items = Vec::new();
-        if dir.exists() && dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let name = path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("Unknown")
-                        .to_string();
+        if dir.exists()
+            && dir.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
 
-                    if path.is_dir() {
-                        items.push(MediaItem {
-                            id: path.to_string_lossy().to_string(),
-                            name,
-                            item_type: MediaItemType::Folder,
-                            duration_secs: None,
-                            index: None,
-                            resume_position_secs: None,
-                            series_name: None,
-                            season_index: None,
-                        });
-                    } else if is_video_file(&path) {
-                        items.push(MediaItem {
-                            id: path.to_string_lossy().to_string(),
-                            name,
-                            item_type: MediaItemType::Playable,
-                            duration_secs: None,
-                            index: None,
-                            resume_position_secs: None,
-                            series_name: Some(dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string()),
-                            season_index: None,
-                        });
-                    }
+                if path.is_dir() {
+                    items.push(MediaItem {
+                        id: path.to_string_lossy().to_string(),
+                        name,
+                        item_type: MediaItemType::Folder,
+                        duration_secs: None,
+                        index: None,
+                        resume_position_secs: None,
+                        series_name: None,
+                        season_index: None,
+                    });
+                } else if is_video_file(&path) {
+                    items.push(MediaItem {
+                        id: path.to_string_lossy().to_string(),
+                        name,
+                        item_type: MediaItemType::Playable,
+                        duration_secs: None,
+                        index: None,
+                        resume_position_secs: None,
+                        series_name: Some(
+                            dir.file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        ),
+                        season_index: None,
+                    });
                 }
             }
         }
@@ -153,28 +159,28 @@ impl MediaProvider for LocalProvider {
     async fn search(&self, query: &str) -> Result<Vec<MediaItem>, AmpError> {
         let q_lower = query.to_lowercase();
         let mut items = Vec::new();
-        if self.media_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&self.media_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let name = path
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("Unknown")
-                        .to_string();
+        if self.media_dir.exists()
+            && let Ok(entries) = std::fs::read_dir(&self.media_dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Unknown")
+                    .to_string();
 
-                    if name.to_lowercase().contains(&q_lower) && is_video_file(&path) {
-                        items.push(MediaItem {
-                            id: path.to_string_lossy().to_string(),
-                            name,
-                            item_type: MediaItemType::Playable,
-                            duration_secs: None,
-                            index: None,
-                            resume_position_secs: None,
-                            series_name: Some("Local Videos".to_string()),
-                            season_index: None,
-                        });
-                    }
+                if name.to_lowercase().contains(&q_lower) && is_video_file(&path) {
+                    items.push(MediaItem {
+                        id: path.to_string_lossy().to_string(),
+                        name,
+                        item_type: MediaItemType::Playable,
+                        duration_secs: None,
+                        index: None,
+                        resume_position_secs: None,
+                        series_name: Some("Local Videos".to_string()),
+                        season_index: None,
+                    });
                 }
             }
         }
@@ -191,7 +197,10 @@ impl MediaProvider for LocalProvider {
 
     fn get_persistable_config(&self) -> HashMap<String, String> {
         let mut map = HashMap::new();
-        map.insert("media_dir".to_string(), self.media_dir.to_string_lossy().to_string());
+        map.insert(
+            "media_dir".to_string(),
+            self.media_dir.to_string_lossy().to_string(),
+        );
         map
     }
 

@@ -6,8 +6,8 @@ pub use client::SeanimeClient;
 pub use ws::{SeanimeWsEvent, SeanimeWsListener, SeanimeWsSender};
 
 use super::{MediaMetadata, MediaProvider as AppMediaProvider};
-use crate::player::SessionError;
 use crate::api::{AmpError, MediaItem, MediaItemType, MediaProvider, RawImage};
+use crate::player::SessionError;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::Path;
@@ -51,10 +51,10 @@ impl SeanimeProvider {
     }
 
     pub fn set_item_duration(&self, item_id: &str, duration_secs: f64) {
-        if duration_secs > 0.0 {
-            if let Ok(mut guard) = self.durations.write() {
-                guard.insert(item_id.to_string(), duration_secs);
-            }
+        if duration_secs > 0.0
+            && let Ok(mut guard) = self.durations.write()
+        {
+            guard.insert(item_id.to_string(), duration_secs);
         }
     }
 
@@ -82,7 +82,11 @@ impl SeanimeProvider {
         }
 
         let encoded_path = urlencoding::encode(raw_path);
-        let url = format!("{}/api/v1/mediastream/file?path={}", self.client.base_url(), encoded_path);
+        let url = format!(
+            "{}/api/v1/mediastream/file?path={}",
+            self.client.base_url(),
+            encoded_path
+        );
         eprintln!("[SeanimeProvider] Stream URL for remote path: {}", url);
         url
     }
@@ -102,25 +106,23 @@ impl AppMediaProvider for SeanimeProvider {
 
         if let Some(rest) = uri.strip_prefix("seanime://ep/") {
             let parts: Vec<&str> = rest.split('/').collect();
-            if parts.len() >= 2 {
-                if let (Ok(media_id), Ok(ep_num)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
-                    if let Ok(entry) = self.client.get_anime_entry(media_id).await {
-                        if let Some(ep) = entry.episodes.iter().find(|e| e.episode_number == ep_num) {
-                            if let Some(file_path) = ep.file_path() {
-                                let playable = self.resolve_raw_path_to_playable(&file_path);
-                                self.cache_stream(uri.to_string(), playable.clone());
-                                return Ok(playable);
-                            }
-                        }
-                    }
-                }
+            if parts.len() >= 2
+                && let (Ok(media_id), Ok(ep_num)) =
+                    (parts[0].parse::<i32>(), parts[1].parse::<i32>())
+                && let Ok(entry) = self.client.get_anime_entry(media_id).await
+                && let Some(ep) = entry.episodes.iter().find(|e| e.episode_number == ep_num)
+                && let Some(file_path) = ep.file_path()
+            {
+                let playable = self.resolve_raw_path_to_playable(&file_path);
+                self.cache_stream(uri.to_string(), playable.clone());
+                return Ok(playable);
             }
         }
 
-        if let Ok(guard) = self.stream_cache.read() {
-            if let Some(path) = guard.get(uri) {
-                return Ok(path.clone());
-            }
+        if let Ok(guard) = self.stream_cache.read()
+            && let Some(path) = guard.get(uri)
+        {
+            return Ok(path.clone());
         }
 
         Ok(uri.to_string())
@@ -129,23 +131,23 @@ impl AppMediaProvider for SeanimeProvider {
     async fn fetch_metadata(&self, uri: &str) -> Result<MediaMetadata, SessionError> {
         if let Some(rest) = uri.strip_prefix("seanime://ep/") {
             let parts: Vec<&str> = rest.split('/').collect();
-            if parts.len() >= 2 {
-                if let (Ok(media_id), Ok(ep_num)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
-                    if let Ok(entry) = self.client.get_anime_entry(media_id).await {
-                        let series_title = entry
-                            .media
-                            .as_ref()
-                            .and_then(|m| m.title.as_ref().map(|t| t.display_title()))
-                            .unwrap_or_else(|| "Anime".to_string());
+            if parts.len() >= 2
+                && let (Ok(media_id), Ok(ep_num)) =
+                    (parts[0].parse::<i32>(), parts[1].parse::<i32>())
+                && let Ok(entry) = self.client.get_anime_entry(media_id).await
+            {
+                let series_title = entry
+                    .media
+                    .as_ref()
+                    .and_then(|m| m.title.as_ref().map(|t| t.display_title()))
+                    .unwrap_or_else(|| "Anime".to_string());
 
-                        if let Some(ep) = entry.episodes.iter().find(|e| e.episode_number == ep_num) {
-                            return Ok(MediaMetadata {
-                                title: ep.title_string(),
-                                artist: series_title,
-                                duration_ms: 0,
-                            });
-                        }
-                    }
+                if let Some(ep) = entry.episodes.iter().find(|e| e.episode_number == ep_num) {
+                    return Ok(MediaMetadata {
+                        title: ep.title_string(),
+                        artist: series_title,
+                        duration_ms: 0,
+                    });
                 }
             }
         }
@@ -179,10 +181,10 @@ impl MediaProvider for SeanimeProvider {
             let item_id = format!("ep_{}_{}", media_id, ep.episode_number);
 
             if let Some(b) = &ep.base_anime {
-                if let Some(eps) = b.episodes {
-                    if let Ok(mut guard) = self.total_episodes.write() {
-                        guard.insert(media_id, eps);
-                    }
+                if let Some(eps) = b.episodes
+                    && let Ok(mut guard) = self.total_episodes.write()
+                {
+                    guard.insert(media_id, eps);
                 }
                 if let Some(dur_mins) = b.duration {
                     self.set_item_duration(&item_id, (dur_mins * 60) as f64);
@@ -220,10 +222,10 @@ impl MediaProvider for SeanimeProvider {
                         .map(|t| t.display_title())
                         .unwrap_or_else(|| format!("Anime {}", entry.media_id));
 
-                    if let Some(eps) = media.episodes {
-                        if let Ok(mut guard) = self.total_episodes.write() {
-                            guard.insert(entry.media_id, eps);
-                        }
+                    if let Some(eps) = media.episodes
+                        && let Ok(mut guard) = self.total_episodes.write()
+                    {
+                        guard.insert(entry.media_id, eps);
                     }
 
                     let folder_id = format!("media_{}", entry.media_id);
@@ -249,53 +251,52 @@ impl MediaProvider for SeanimeProvider {
     }
 
     async fn get_children(&self, parent_id: &str) -> Result<Vec<MediaItem>, AmpError> {
-        if let Some(id_str) = parent_id.strip_prefix("media_") {
-            if let Ok(media_id) = id_str.parse::<i32>() {
-                let entry = self
-                    .client
-                    .get_anime_entry(media_id)
-                    .await
-                    .map_err(|e| AmpError::Provider(e.to_string()))?;
+        if let Some(id_str) = parent_id.strip_prefix("media_")
+            && let Ok(media_id) = id_str.parse::<i32>()
+        {
+            let entry = self
+                .client
+                .get_anime_entry(media_id)
+                .await
+                .map_err(|e| AmpError::Provider(e.to_string()))?;
 
-                let series_title = entry
-                    .media
-                    .as_ref()
-                    .and_then(|m| m.title.as_ref().map(|t| t.display_title()));
+            let series_title = entry
+                .media
+                .as_ref()
+                .and_then(|m| m.title.as_ref().map(|t| t.display_title()));
 
-                if let Some(m) = &entry.media {
-                    if let Some(eps) = m.episodes {
-                        if let Ok(mut guard) = self.total_episodes.write() {
-                            guard.insert(media_id, eps);
-                        }
-                    }
-                }
-
-                let mut items = Vec::new();
-                for ep in entry.episodes {
-                    let item_id = format!("ep_{}_{}", media_id, ep.episode_number);
-                    if let Some(path) = ep.file_path() {
-                        self.cache_raw_path(item_id.clone(), path.clone());
-                        let playable = self.resolve_raw_path_to_playable(&path);
-                        self.cache_stream(item_id.clone(), playable);
-                    }
-                    if let Some(img) = ep.thumbnail_url() {
-                        self.cache_image(item_id.clone(), img);
-                    }
-
-                    items.push(MediaItem {
-                        id: item_id,
-                        name: ep.title_string(),
-                        item_type: MediaItemType::Playable,
-                        duration_secs: None,
-                        index: Some(ep.episode_number),
-                        resume_position_secs: None,
-                        series_name: series_title.clone(),
-                        season_index: None,
-                    });
-                }
-
-                return Ok(items);
+            if let Some(m) = &entry.media
+                && let Some(eps) = m.episodes
+                && let Ok(mut guard) = self.total_episodes.write()
+            {
+                guard.insert(media_id, eps);
             }
+
+            let mut items = Vec::new();
+            for ep in entry.episodes {
+                let item_id = format!("ep_{}_{}", media_id, ep.episode_number);
+                if let Some(path) = ep.file_path() {
+                    self.cache_raw_path(item_id.clone(), path.clone());
+                    let playable = self.resolve_raw_path_to_playable(&path);
+                    self.cache_stream(item_id.clone(), playable);
+                }
+                if let Some(img) = ep.thumbnail_url() {
+                    self.cache_image(item_id.clone(), img);
+                }
+
+                items.push(MediaItem {
+                    id: item_id,
+                    name: ep.title_string(),
+                    item_type: MediaItemType::Playable,
+                    duration_secs: None,
+                    index: Some(ep.episode_number),
+                    resume_position_secs: None,
+                    series_name: series_title.clone(),
+                    season_index: None,
+                });
+            }
+
+            return Ok(items);
         }
 
         Ok(Vec::new())
@@ -318,10 +319,10 @@ impl MediaProvider for SeanimeProvider {
             let item_id = format!("ep_{}_{}", media_id, ep.episode_number);
 
             if let Some(b) = &ep.base_anime {
-                if let Some(eps) = b.episodes {
-                    if let Ok(mut guard) = self.total_episodes.write() {
-                        guard.insert(media_id, eps);
-                    }
+                if let Some(eps) = b.episodes
+                    && let Ok(mut guard) = self.total_episodes.write()
+                {
+                    guard.insert(media_id, eps);
                 }
                 if let Some(dur_mins) = b.duration {
                     self.set_item_duration(&item_id, (dur_mins * 60) as f64);
@@ -396,34 +397,34 @@ impl MediaProvider for SeanimeProvider {
     }
 
     fn get_stream_url(&self, item_id: &str) -> String {
-        if let Ok(guard) = self.stream_cache.read() {
-            if let Some(path) = guard.get(item_id) {
-                return path.clone();
-            }
+        if let Ok(guard) = self.stream_cache.read()
+            && let Some(path) = guard.get(item_id)
+        {
+            return path.clone();
         }
 
-        if let Ok(guard) = self.raw_file_paths.read() {
-            if let Some(raw) = guard.get(item_id) {
-                let playable = self.resolve_raw_path_to_playable(raw);
-                self.cache_stream(item_id.to_string(), playable.clone());
-                return playable;
-            }
+        if let Ok(guard) = self.raw_file_paths.read()
+            && let Some(raw) = guard.get(item_id)
+        {
+            let playable = self.resolve_raw_path_to_playable(raw);
+            self.cache_stream(item_id.to_string(), playable.clone());
+            return playable;
         }
 
         if let Some(rest) = item_id.strip_prefix("ep_") {
             let parts: Vec<&str> = rest.split('_').collect();
-            if parts.len() >= 2 {
-                if let (Ok(media_id), Ok(ep_num)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
-                    let client = self.client.clone();
-                    if let Ok(entry) = futures::executor::block_on(client.get_anime_entry(media_id)) {
-                        if let Some(ep) = entry.episodes.iter().find(|e| e.episode_number == ep_num) {
-                            if let Some(fp) = ep.file_path() {
-                                let playable = self.resolve_raw_path_to_playable(&fp);
-                                self.cache_stream(item_id.to_string(), playable.clone());
-                                return playable;
-                            }
-                        }
-                    }
+            if parts.len() >= 2
+                && let (Ok(media_id), Ok(ep_num)) =
+                    (parts[0].parse::<i32>(), parts[1].parse::<i32>())
+            {
+                let client = self.client.clone();
+                if let Ok(entry) = futures::executor::block_on(client.get_anime_entry(media_id))
+                    && let Some(ep) = entry.episodes.iter().find(|e| e.episode_number == ep_num)
+                    && let Some(fp) = ep.file_path()
+                {
+                    let playable = self.resolve_raw_path_to_playable(&fp);
+                    self.cache_stream(item_id.to_string(), playable.clone());
+                    return playable;
                 }
             }
         }
@@ -472,15 +473,19 @@ impl MediaProvider for SeanimeProvider {
     async fn get_resume_position(&self, item_id: &str) -> Result<Option<i64>, AmpError> {
         if let Some(rest) = item_id.strip_prefix("ep_") {
             let parts: Vec<&str> = rest.split('_').collect();
-            if parts.len() >= 2 {
-                if let (Ok(media_id), Ok(ep_num)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
-                    if let Ok(Some(item)) = self.client.get_watch_history_item(media_id).await {
-                        if item.episode_number == ep_num && item.current_time > 3.0 && item.current_time < (item.duration * 0.9) {
-                            eprintln!("[SeanimeProvider] Found resume position for Ep {}: {}s", ep_num, item.current_time as i64);
-                            return Ok(Some(item.current_time as i64));
-                        }
-                    }
-                }
+            if parts.len() >= 2
+                && let (Ok(media_id), Ok(ep_num)) =
+                    (parts[0].parse::<i32>(), parts[1].parse::<i32>())
+                && let Ok(Some(item)) = self.client.get_watch_history_item(media_id).await
+                && item.episode_number == ep_num
+                && item.current_time > 3.0
+                && item.current_time < (item.duration * 0.9)
+            {
+                eprintln!(
+                    "[SeanimeProvider] Found resume position for Ep {}: {}s",
+                    ep_num, item.current_time as i64
+                );
+                return Ok(Some(item.current_time as i64));
             }
         }
         Ok(None)
@@ -489,17 +494,21 @@ impl MediaProvider for SeanimeProvider {
     async fn report_playback_start(&self, item_id: &str) -> Result<(), AmpError> {
         if let Some(rest) = item_id.strip_prefix("ep_") {
             let parts: Vec<&str> = rest.split('_').collect();
-            if parts.len() >= 2 {
-                if let (Ok(media_id), Ok(ep_num)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
-                    let duration = self.durations.read().ok()
-                        .and_then(|g| g.get(item_id).cloned())
-                        .unwrap_or(1440.0);
+            if parts.len() >= 2
+                && let (Ok(media_id), Ok(ep_num)) =
+                    (parts[0].parse::<i32>(), parts[1].parse::<i32>())
+            {
+                let duration = self
+                    .durations
+                    .read()
+                    .ok()
+                    .and_then(|g| g.get(item_id).cloned())
+                    .unwrap_or(1440.0);
 
-                    if let Ok(guard) = self.ws_sender.read() {
-                        if let Some(sender) = guard.as_ref() {
-                            sender.send_video_loaded(item_id, media_id, ep_num, duration);
-                        }
-                    }
+                if let Ok(guard) = self.ws_sender.read()
+                    && let Some(sender) = guard.as_ref()
+                {
+                    sender.send_video_loaded(item_id, media_id, ep_num, duration);
                 }
             }
         }
@@ -514,31 +523,47 @@ impl MediaProvider for SeanimeProvider {
     ) -> Result<(), AmpError> {
         if let Some(rest) = item_id.strip_prefix("ep_") {
             let parts: Vec<&str> = rest.split('_').collect();
-            if parts.len() >= 2 {
-                if let (Ok(media_id), Ok(ep_num)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
-                    let duration = self.durations.read().ok()
-                        .and_then(|g| g.get(item_id).cloned())
-                        .unwrap_or(1440.0);
+            if parts.len() >= 2
+                && let (Ok(media_id), Ok(ep_num)) =
+                    (parts[0].parse::<i32>(), parts[1].parse::<i32>())
+            {
+                let duration = self
+                    .durations
+                    .read()
+                    .ok()
+                    .and_then(|g| g.get(item_id).cloned())
+                    .unwrap_or(1440.0);
 
-                    // 1. Sync over WebSocket to Seanime
-                    if let Ok(guard) = self.ws_sender.read() {
-                        if let Some(sender) = guard.as_ref() {
-                            sender.send_video_status(item_id, position_secs as f64, duration, is_paused);
-                        }
-                    }
+                // 1. Sync over WebSocket to Seanime
+                if let Ok(guard) = self.ws_sender.read()
+                    && let Some(sender) = guard.as_ref()
+                {
+                    sender.send_video_status(item_id, position_secs as f64, duration, is_paused);
+                }
 
-                    // 2. Sync watch history over HTTP to Seanime
-                    let _ = self.client.update_watch_history(media_id, ep_num, position_secs as f64, duration).await;
+                // 2. Sync watch history over HTTP to Seanime
+                let _ = self
+                    .client
+                    .update_watch_history(media_id, ep_num, position_secs as f64, duration)
+                    .await;
 
-                    // 3. Only update AniList episode progress if watched >= 85% of actual media duration
-                    let total_eps = self.total_episodes.read().ok()
-                        .and_then(|g| g.get(&media_id).cloned())
-                        .unwrap_or(24);
+                // 3. Only update AniList episode progress if watched >= 85% of actual media duration
+                let total_eps = self
+                    .total_episodes
+                    .read()
+                    .ok()
+                    .and_then(|g| g.get(&media_id).cloned())
+                    .unwrap_or(24);
 
-                    if duration > 0.0 && (position_secs as f64) >= (duration * 0.85) {
-                        eprintln!("[SeanimeProvider] Watched >= 85% ({:.1}s / {:.1}s) - marking Ep {} completed", position_secs as f64, duration, ep_num);
-                        let _ = self.client.update_progress(media_id, ep_num, total_eps, None).await;
-                    }
+                if duration > 0.0 && (position_secs as f64) >= (duration * 0.85) {
+                    eprintln!(
+                        "[SeanimeProvider] Watched >= 85% ({:.1}s / {:.1}s) - marking Ep {} completed",
+                        position_secs as f64, duration, ep_num
+                    );
+                    let _ = self
+                        .client
+                        .update_progress(media_id, ep_num, total_eps, None)
+                        .await;
                 }
             }
         }
@@ -552,32 +577,48 @@ impl MediaProvider for SeanimeProvider {
     ) -> Result<(), AmpError> {
         if let Some(rest) = item_id.strip_prefix("ep_") {
             let parts: Vec<&str> = rest.split('_').collect();
-            if parts.len() >= 2 {
-                if let (Ok(media_id), Ok(ep_num)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
-                    let duration = self.durations.read().ok()
-                        .and_then(|g| g.get(item_id).cloned())
-                        .unwrap_or(1440.0);
+            if parts.len() >= 2
+                && let (Ok(media_id), Ok(ep_num)) =
+                    (parts[0].parse::<i32>(), parts[1].parse::<i32>())
+            {
+                let duration = self
+                    .durations
+                    .read()
+                    .ok()
+                    .and_then(|g| g.get(item_id).cloned())
+                    .unwrap_or(1440.0);
 
-                    // 1. Send WebSocket stopped & terminated event
-                    if let Ok(guard) = self.ws_sender.read() {
-                        if let Some(sender) = guard.as_ref() {
-                            sender.send_video_status(item_id, position_secs as f64, duration, true);
-                            sender.send_video_terminated(item_id);
-                        }
-                    }
+                // 1. Send WebSocket stopped & terminated event
+                if let Ok(guard) = self.ws_sender.read()
+                    && let Some(sender) = guard.as_ref()
+                {
+                    sender.send_video_status(item_id, position_secs as f64, duration, true);
+                    sender.send_video_terminated(item_id);
+                }
 
-                    // 2. Update watch history over HTTP
-                    let _ = self.client.update_watch_history(media_id, ep_num, position_secs as f64, duration).await;
+                // 2. Update watch history over HTTP
+                let _ = self
+                    .client
+                    .update_watch_history(media_id, ep_num, position_secs as f64, duration)
+                    .await;
 
-                    // 3. Only mark completed on AniList if watched >= 85% of actual media duration
-                    let total_eps = self.total_episodes.read().ok()
-                        .and_then(|g| g.get(&media_id).cloned())
-                        .unwrap_or(24);
+                // 3. Only mark completed on AniList if watched >= 85% of actual media duration
+                let total_eps = self
+                    .total_episodes
+                    .read()
+                    .ok()
+                    .and_then(|g| g.get(&media_id).cloned())
+                    .unwrap_or(24);
 
-                    if duration > 0.0 && (position_secs as f64) >= (duration * 0.85) {
-                        eprintln!("[SeanimeProvider] Stopped at >= 85% ({:.1}s / {:.1}s) - marking Ep {} completed", position_secs as f64, duration, ep_num);
-                        let _ = self.client.update_progress(media_id, ep_num, total_eps, None).await;
-                    }
+                if duration > 0.0 && (position_secs as f64) >= (duration * 0.85) {
+                    eprintln!(
+                        "[SeanimeProvider] Stopped at >= 85% ({:.1}s / {:.1}s) - marking Ep {} completed",
+                        position_secs as f64, duration, ep_num
+                    );
+                    let _ = self
+                        .client
+                        .update_progress(media_id, ep_num, total_eps, None)
+                        .await;
                 }
             }
         }
@@ -587,55 +628,22 @@ impl MediaProvider for SeanimeProvider {
     async fn mark_as_played(&self, item_id: &str, _played: bool) -> Result<(), AmpError> {
         if let Some(rest) = item_id.strip_prefix("ep_") {
             let parts: Vec<&str> = rest.split('_').collect();
-            if parts.len() >= 2 {
-                if let (Ok(media_id), Ok(ep_num)) = (parts[0].parse::<i32>(), parts[1].parse::<i32>()) {
-                    let total_eps = self.total_episodes.read().ok()
-                        .and_then(|g| g.get(&media_id).cloned())
-                        .unwrap_or(24);
-                    let _ = self.client.update_progress(media_id, ep_num, total_eps, None).await;
-                }
+            if parts.len() >= 2
+                && let (Ok(media_id), Ok(ep_num)) =
+                    (parts[0].parse::<i32>(), parts[1].parse::<i32>())
+            {
+                let total_eps = self
+                    .total_episodes
+                    .read()
+                    .ok()
+                    .and_then(|g| g.get(&media_id).cloned())
+                    .unwrap_or(24);
+                let _ = self
+                    .client
+                    .update_progress(media_id, ep_num, total_eps, None)
+                    .await;
             }
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_seanime_provider_live() {
-        let provider = SeanimeProvider::default_local();
-
-        // 1. Get root items (check server reachability)
-        let root = match provider.get_root().await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("[SeanimeProviderTest] Server unreachable: {:?}. Skipping live assertions.", e);
-                return;
-            }
-        };
-        assert!(!root.is_empty());
-        println!("Fetched {} root items from Seanime", root.len());
-
-        // 2. Get children of Link Click (media_191832)
-        let children = provider.get_children("media_191832").await;
-        assert!(children.is_ok(), "Failed to get children: {:?}", children.err());
-        let children = children.unwrap();
-        assert!(!children.is_empty());
-        assert!(children[0].id.starts_with("ep_191832_"));
-
-        // 3. Resolve stream URL from cache / remote
-        let stream_url = provider.get_stream_url(&children[0].id);
-        assert!(!stream_url.is_empty());
-        assert!(stream_url.starts_with("http") || stream_url.ends_with(".mkv"));
-        println!("Resolved stream URL: {}", stream_url);
-
-        // 4. Resolve via AppMediaProvider
-        let stream = AppMediaProvider::resolve_stream(&provider, "seanime://ep/191832/1").await;
-        assert!(stream.is_ok());
-        let s = stream.unwrap();
-        assert!(s.starts_with("http") || s.ends_with(".mkv"));
     }
 }

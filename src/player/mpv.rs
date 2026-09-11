@@ -146,7 +146,10 @@ pub async fn open_player(
         }
 
         let (provider_id, i_id) = state.current_item_id.clone().unwrap();
-        eprintln!("[AMP] open_player: Loading item '{}' with provider '{}'", i_id, provider_id);
+        eprintln!(
+            "[AMP] open_player: Loading item '{}' with provider '{}'",
+            i_id, provider_id
+        );
 
         (state.active_providers.get(&provider_id).cloned(), i_id)
     };
@@ -169,10 +172,10 @@ pub async fn open_player(
     if let Some((url, headers_part)) = stream_url.split_once('|') {
         final_url = url.to_string();
         for part in headers_part.split(';') {
-            if let Some((key, val)) = part.split_once('=') {
-                if key == "Referer" {
-                    referer = Some(val.to_string());
-                }
+            if let Some((key, val)) = part.split_once('=')
+                && key == "Referer"
+            {
+                referer = Some(val.to_string());
             }
         }
     }
@@ -190,7 +193,10 @@ pub async fn open_player(
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ref_val) = referer {
             let c_opt = CString::new("http-header-fields").unwrap();
-            let header_str = format!("Referer: {},User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", ref_val);
+            let header_str = format!(
+                "Referer: {},User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                ref_val
+            );
             let c_val = CString::new(header_str).unwrap();
             unsafe {
                 mpv_set_property_string(mpv.get(), c_opt.as_ptr(), c_val.as_ptr());

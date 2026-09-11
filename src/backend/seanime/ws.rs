@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
@@ -18,10 +18,21 @@ pub struct RawWsMessage {
 #[derive(Debug, Clone)]
 pub enum SeanimeWsEvent {
     LibraryUpdated,
-    ProgressUpdated { media_id: i32, episode_number: i32 },
-    ScanProgress { message: String },
-    PlaybackState { is_playing: bool, position_secs: i64 },
-    RawEvent { event_type: String, payload: serde_json::Value },
+    ProgressUpdated {
+        media_id: i32,
+        episode_number: i32,
+    },
+    ScanProgress {
+        message: String,
+    },
+    PlaybackState {
+        is_playing: bool,
+        position_secs: i64,
+    },
+    RawEvent {
+        event_type: String,
+        payload: serde_json::Value,
+    },
 }
 
 #[derive(Clone)]
@@ -174,7 +185,10 @@ impl SeanimeWsListener {
                 eprintln!("[SeanimeWS] Connecting to {}...", ws_url_str);
                 match connect_async(&ws_url_str).await {
                     Ok((ws_stream, response)) => {
-                        eprintln!("[SeanimeWS] Connected successfully! Status: {}", response.status());
+                        eprintln!(
+                            "[SeanimeWS] Connected successfully! Status: {}",
+                            response.status()
+                        );
                         backoff = Duration::from_millis(500);
 
                         let (mut write, mut read) = ws_stream.split();
@@ -192,8 +206,8 @@ impl SeanimeWsListener {
                                     match msg_res {
                                         Some(Ok(msg)) => {
                                             if msg.is_text() {
-                                                if let Ok(text) = msg.to_text() {
-                                                    if let Ok(raw) = serde_json::from_str::<RawWsMessage>(text) {
+                                                if let Ok(text) = msg.to_text()
+                                                    && let Ok(raw) = serde_json::from_str::<RawWsMessage>(text) {
                                                         let event_type = raw.event_type.unwrap_or_default();
                                                         let payload = raw.payload.unwrap_or(serde_json::Value::Null);
 
@@ -221,7 +235,6 @@ impl SeanimeWsListener {
 
                                                         let _ = event_tx.send(parsed_event);
                                                     }
-                                                }
                                             } else if msg.is_close() {
                                                 eprintln!("[SeanimeWS] Server sent close frame");
                                                 break;
@@ -241,18 +254,20 @@ impl SeanimeWsListener {
                                         futures::future::pending().await
                                     }
                                 } => {
-                                    if let Some(outbound_msg) = outbound_opt {
-                                        if let Err(e) = write.send(Message::Text(outbound_msg.into())).await {
+                                    if let Some(outbound_msg) = outbound_opt
+                                        && let Err(e) = write.send(Message::Text(outbound_msg.into())).await {
                                             eprintln!("[SeanimeWS] Error sending message: {:?}", e);
                                             break;
                                         }
-                                    }
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("[SeanimeWS] Connection failed: {:?}. Retrying in {:?}", e, backoff);
+                        eprintln!(
+                            "[SeanimeWS] Connection failed: {:?}. Retrying in {:?}",
+                            e, backoff
+                        );
                     }
                 }
 

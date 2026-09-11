@@ -1,5 +1,5 @@
 use crate::api::{PlaybackExtension, PlaybackInfo};
-use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
+use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -34,14 +34,13 @@ impl DiscordRPC {
                     let _ = tx.send(res);
                 });
 
-                match tokio::time::timeout(Duration::from_secs(4), rx).await {
-                    Ok(Ok(Some(ipc_client))) => {
-                        eprintln!("[DiscordRPC] Connected to Discord client successfully");
-                        let mut client_lock = client_clone.lock().unwrap();
-                        *client_lock = Some(ipc_client);
-                        break;
-                    }
-                    _ => {}
+                if let Ok(Ok(Some(ipc_client))) =
+                    tokio::time::timeout(Duration::from_secs(4), rx).await
+                {
+                    eprintln!("[DiscordRPC] Connected to Discord client successfully");
+                    let mut client_lock = client_clone.lock().unwrap();
+                    *client_lock = Some(ipc_client);
+                    break;
                 }
                 tokio::time::sleep(Duration::from_secs(15)).await;
             }
