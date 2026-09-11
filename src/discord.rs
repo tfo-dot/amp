@@ -1,7 +1,5 @@
-use amp_api::{AmpError, AmpPlugin, PlaybackExtension, PlaybackInfo, PluginCapability};
-use async_trait::async_trait;
+use crate::api::{PlaybackExtension, PlaybackInfo};
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -21,13 +19,11 @@ impl DiscordRPC {
             .as_secs() as i64;
 
         let client = Arc::new(Mutex::new(None));
-
         let client_clone = client.clone();
+
         tokio::spawn(async move {
             let client_id = "622783718783844356";
             loop {
-                eprintln!("[Discord] Attempting to connect in background...");
-
                 let (tx, rx) = tokio::sync::oneshot::channel();
                 std::thread::spawn(move || {
                     let res = (|| {
@@ -38,18 +34,15 @@ impl DiscordRPC {
                     let _ = tx.send(res);
                 });
 
-                match tokio::time::timeout(Duration::from_secs(5), rx).await {
-                    Ok(Ok(Some(client))) => {
-                        eprintln!("[Discord] Connection established");
-                        let mut client_lock = client_clone.lock().unwrap();
-                        *client_lock = Some(client);
-                        break;
-                    }
-                    _ => {
-                        eprintln!("[Discord] Connection attempt failed or timed out");
-                    }
+                if let Ok(Ok(Some(ipc_client))) =
+                    tokio::time::timeout(Duration::from_secs(4), rx).await
+                {
+                    eprintln!("[DiscordRPC] Connected to Discord client successfully");
+                    let mut client_lock = client_clone.lock().unwrap();
+                    *client_lock = Some(ipc_client);
+                    break;
                 }
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                tokio::time::sleep(Duration::from_secs(15)).await;
             }
         });
 
@@ -63,6 +56,12 @@ impl DiscordRPC {
     }
 }
 
+impl Default for DiscordRPC {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PlaybackExtension for DiscordRPC {
     fn on_playback_update(&self, info: PlaybackInfo) {
         if info.title.is_empty() {
@@ -70,7 +69,7 @@ impl PlaybackExtension for DiscordRPC {
         }
 
         let mut client_lock = self.client.lock().unwrap();
-        if let Some(ref mut client) = *client_lock {
+        if let Some(client) = &mut *client_lock {
             let mut last_title = self.last_title.lock().unwrap();
             let mut last_paused = self.last_paused.lock().unwrap();
             let mut has_activity = self.has_activity.lock().unwrap();
@@ -79,11 +78,6 @@ impl PlaybackExtension for DiscordRPC {
             if *last_title == info.title && *last_paused == info.is_paused && *has_activity {
                 return;
             }
-
-            eprintln!(
-                "[Discord] Updating activity: {} - {} (paused: {})",
-                info.title, info.artist, info.is_paused
-            );
 
             if *last_title != info.title {
                 *start_time = SystemTime::now()
@@ -98,19 +92,17 @@ impl PlaybackExtension for DiscordRPC {
 
             let mut act = activity::Activity::new();
 
-            let state = if info.is_paused {
+            let state_str = if info.is_paused {
                 "Paused".to_string()
+            } else if !info.artist.is_empty() {
+                info.artist
             } else {
-                if !info.artist.is_empty() {
-                    info.artist
-                } else {
-                    "Playing".to_string()
-                }
+                "Watching".to_string()
             };
 
             act = act
                 .details(&info.title)
-                .state(&state)
+                .state(&state_str)
                 .activity_type(activity::ActivityType::Watching);
 
             if !info.is_paused && info.duration_secs > 0 {
@@ -127,11 +119,8 @@ impl PlaybackExtension for DiscordRPC {
             }
 
             if let Err(e) = client.set_activity(act) {
-                eprintln!("[Discord] Failed to set activity: {}", e);
-                if let Err(re) = client.reconnect() {
-                    eprintln!("[Discord] Reconnect failed: {}", re);
-                    *client_lock = None;
-                }
+                eprintln!("[DiscordRPC] Failed to update activity: {}", e);
+                let _ = client.reconnect();
             }
         }
     }
@@ -139,34 +128,11 @@ impl PlaybackExtension for DiscordRPC {
     fn on_playback_stop(&self) {
         let mut has_activity = self.has_activity.lock().unwrap();
         if *has_activity {
-            if let Some(ref mut client) = *self.client.lock().unwrap() {
+            if let Some(client) = &mut *self.client.lock().unwrap() {
                 let _ = client.clear_activity();
             }
             *has_activity = false;
             self.last_title.lock().unwrap().clear();
         }
-    }
-
-    fn set_controller(&self, _controller: Arc<dyn amp_api::PlaybackController>) {}
-}
-
-pub struct DiscordExtensionFactory;
-
-#[async_trait]
-impl AmpPlugin for DiscordExtensionFactory {
-    fn id(&self) -> &'static str {
-        "discord"
-    }
-    fn display_name(&self) -> &'static str {
-        "Discord Rich Presence"
-    }
-    fn capabilities(&self) -> Vec<PluginCapability> {
-        vec![PluginCapability::PlaybackExtension]
-    }
-    async fn create_extension(
-        &self,
-        _config: HashMap<String, String>,
-    ) -> Result<Arc<dyn PlaybackExtension>, AmpError> {
-        Ok(Arc::new(DiscordRPC::new()))
     }
 }

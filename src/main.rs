@@ -2,34 +2,44 @@
 
 slint::include_modules!();
 
+mod api;
+mod app;
 mod app_state;
+mod backend;
 mod discord;
-mod fbo;
+mod extensions;
 mod image_cache;
-mod jellyfin;
 mod navigation;
 mod player;
-mod plugin_manager;
+mod ui;
 
-use amp_api::{MediaItemType, PlaybackInfo};
+use crate::api::{MediaItemType, PlaybackExtension, PlaybackInfo};
 use app_state::{AppState, PlaylistItem};
-use fbo::GLResources;
+use backend::local::LocalProvider;
+use backend::seanime::{SeanimeClient, SeanimeProvider, SeanimeWsEvent, SeanimeWsListener};
+use discord::DiscordRPC;
+use extensions::{ExtensionWatcher, PartsExtensionBridge};
 use glow::HasContext;
 use image_cache::ImageCache;
 use libmpv_sys::*;
 use navigation::{format_time, image_from_raw, load_dashboard, load_folder};
-use player::{MpvHandle, MpvRenderCtx, open_player};
-use plugin_manager::PluginManager;
-use slint::{BorrowedOpenGLTextureBuilder, BorrowedOpenGLTextureOrigin, ComponentHandle, Model, Weak};
+use player::{GLResources, MpvHandle, MpvRenderCtx, configure_hardware_acceleration, open_player};
+use slint::{
+    BorrowedOpenGLTextureBuilder, BorrowedOpenGLTextureOrigin, ComponentHandle, Model, Weak,
+};
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_int, c_void};
+use std::ptr;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 struct AppPlaybackController {
-    ui: Weak<PlayerWindow>,
+    ui: Weak<AppWindow>,
     mpv: MpvHandle,
 }
 
-impl amp_api::PlaybackController for AppPlaybackController {
+impl crate::api::PlaybackController for AppPlaybackController {
     fn play(&self) {
         let c_pause = CString::new("pause").unwrap();
         let paused: c_int = 0;
@@ -102,14 +112,109 @@ impl amp_api::PlaybackController for AppPlaybackController {
         }
     }
 }
-use std::os::raw::{c_char, c_int, c_void};
-use std::ptr;
-use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+
+//Prov is (id, provider), position: (series, ep)
+async fn play_episode_with_series_playlist(
+    prov: (String, crate::api::DynProvider),
+    item_id: String,
+    item_name: String,
+    series_name: String,
+    position: (i32, i32),
+    ui_weak: Weak<AppWindow>,
+    state_arc: Arc<Mutex<AppState>>,
+    mpv: MpvHandle,
+) {
+    let mut playlist_items = Vec::new();
+    let mut current_idx = 0;
+
+    // Check if we can load the full series playlist from the provider
+    if let Some(rest) = item_id.strip_prefix("ep_") {
+        let parts: Vec<&str> = rest.split('_').collect();
+        if parts.len() >= 2 {
+            let media_id = parts[0];
+            let folder_id = format!("media_{}", media_id);
+            if let Ok(children) = prov.1.get_children(&folder_id).await {
+                for (idx, child) in children.into_iter().enumerate() {
+                    if child.id == item_id {
+                        current_idx = idx;
+                    }
+                    playlist_items.push(PlaylistItem {
+                        p_id: prov.0.clone(),
+                        item_id: child.id,
+                        name: child.name,
+                        series_name: child.series_name.unwrap_or_else(|| series_name.clone()),
+                        index: child.index.unwrap_or(0),
+                        season_index: child.season_index.unwrap_or(0),
+                    });
+                }
+            }
+        }
+    }
+
+    // Fallback if playlist is empty: check state.current_items_ids
+    if playlist_items.is_empty() {
+        let s = state_arc.lock().unwrap();
+        if let Some(ui) = ui_weak.upgrade() {
+            let model = ui.get_current_items();
+            for (i, id_pair) in s.current_items_ids.iter().enumerate() {
+                if let Some(it) = model.row_data(i)
+                    && !it.is_folder
+                {
+                    if id_pair.1 == item_id {
+                        current_idx = playlist_items.len();
+                    }
+                    playlist_items.push(PlaylistItem {
+                        p_id: id_pair.0.clone(),
+                        item_id: id_pair.1.clone(),
+                        name: it.name.to_string(),
+                        series_name: it.series_name.to_string(),
+                        index: it.index,
+                        season_index: it.season_index,
+                    });
+                }
+            }
+        }
+    }
+
+    // Final fallback
+    if playlist_items.is_empty() {
+        playlist_items.push(PlaylistItem {
+            p_id: prov.0.clone(),
+            item_id: item_id.clone(),
+            name: item_name.clone(),
+            series_name: series_name.clone(),
+            season_index: position.0,
+            index: position.1,
+        });
+    }
+
+    {
+        let mut s = state_arc.lock().unwrap();
+        s.active_playlist = Some((playlist_items, current_idx));
+        s.current_title = item_name;
+        s.current_artist = series_name.clone();
+        s.current_series_name = Some(series_name);
+        s.current_season_index = Some(position.0);
+        s.current_episode_index = Some(position.1);
+        s.current_item_id = Some((prov.0, item_id));
+    }
+
+    let _ = slint::invoke_from_event_loop({
+        let ui_weak = ui_weak.clone();
+        move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_is_loading(true);
+                ui.set_current_screen("player".into());
+            }
+        }
+    });
+
+    open_player(ui_weak, state_arc, mpv).await;
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("[AMP] Starting up...");
+    eprintln!("[AMP] Starting up native media client...");
 
     unsafe {
         std::env::set_var("LC_NUMERIC", "C");
@@ -119,42 +224,114 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!("[AMP] Initializing UI...");
-    let ui = PlayerWindow::new()?;
+    let ui = AppWindow::new()?;
 
-    eprintln!("[AMP] Initializing Plugin Manager...");
-
-    let mut plugin_manager = PluginManager::new();
-
-    plugin_manager.register_builtin_plugin(Arc::new(jellyfin::JellyfinFactory));
-    plugin_manager.register_builtin_plugin(Arc::new(discord::DiscordExtensionFactory));
-    plugin_manager.load_plugins();
-
-    let provider_list: Vec<ProviderMetadata> = plugin_manager
-        .with_capability(amp_api::PluginCapability::MediaProvider)
-        .iter()
-        .map(|f| ProviderMetadata {
-            id: f.id().into(),
-            name: f.display_name().into(),
-        })
-        .collect();
-
-    ui.set_available_providers(slint::ModelRc::from(std::rc::Rc::new(
-        slint::VecModel::from(provider_list),
-    )));
-
-    let plugin_manager = Arc::new(Mutex::new(plugin_manager));
     let state = Arc::new(Mutex::new(AppState::new()));
     let cache = Arc::new(ImageCache::new());
 
     eprintln!("[AMP] Creating MpvHandle...");
     let mpv = MpvHandle::new();
+    configure_hardware_acceleration(mpv.get());
 
     let controller = Arc::new(AppPlaybackController {
         ui: ui.as_weak(),
         mpv: mpv.clone(),
     });
+    extensions::bridge::set_global_controller(controller.clone());
 
-    let extensions = Arc::new(plugin_manager.lock().unwrap().get_extensions(controller));
+    // Initialize Discord RPC
+    let discord = Arc::new(DiscordRPC::new());
+
+    // Initialize Providers
+    let seanime_client = Arc::new(SeanimeClient::default_local());
+    let seanime_provider = Arc::new(SeanimeProvider::new(seanime_client.clone()));
+    let local_provider = Arc::new(LocalProvider::new());
+    let parts_bridge = Arc::new(PartsExtensionBridge::new());
+    let _ = parts_bridge.load_scripts();
+
+    // Register active providers
+    {
+        let mut s = state.lock().unwrap();
+        s.active_providers
+            .insert("seanime".to_string(), seanime_provider.clone());
+        s.active_providers
+            .insert("local".to_string(), local_provider.clone());
+        s.active_providers
+            .insert("parts".to_string(), parts_bridge.clone());
+    }
+
+    let provider_list: Vec<ProviderMetadata> = vec![
+        ProviderMetadata {
+            id: "seanime".into(),
+            name: "Seanime".into(),
+        },
+        ProviderMetadata {
+            id: "local".into(),
+            name: "Local Files".into(),
+        },
+        ProviderMetadata {
+            id: "parts".into(),
+            name: "Parts Extensions".into(),
+        },
+    ];
+
+    ui.set_available_providers(slint::ModelRc::from(std::rc::Rc::new(
+        slint::VecModel::from(provider_list),
+    )));
+
+    // Hot-reload file watcher for .pts scripts
+    let mut watcher = ExtensionWatcher::new();
+    if let Some(parts_dir) = extensions::bridge::get_parts_dir() {
+        let bridge_clone = parts_bridge.clone();
+        watcher.start(vec![parts_dir], move |script_path| {
+            let _ = bridge_clone.load_scripts();
+            eprintln!("[AMP] Reloaded parts extensions: {}", script_path);
+        });
+    }
+
+    // Seanime WebSocket listener
+    let ws_listener = SeanimeWsListener::new();
+    seanime_provider.set_ws_sender(ws_listener.sender());
+    let (ws_tx, mut ws_rx) = tokio::sync::mpsc::unbounded_channel::<SeanimeWsEvent>();
+    let _ws_handle = ws_listener.start(seanime_client.base_url().to_string(), ws_tx);
+    // Forward WebSocket events to UI
+    let ui_ws = ui.as_weak();
+    let state_ws = state.clone();
+    let cache_ws = cache.clone();
+    tokio::spawn(async move {
+        while let Some(event) = ws_rx.recv().await {
+            match event {
+                SeanimeWsEvent::LibraryUpdated => {
+                    eprintln!("[AMP] WebSocket: Library updated, refreshing dashboard");
+                    let ui_weak = ui_ws.clone();
+                    let state_arc = state_ws.clone();
+                    let cache_arc = cache_ws.clone();
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_weak.upgrade()
+                            && ui.get_current_screen() == "library"
+                        {
+                            tokio::spawn(async move {
+                                let _ = load_dashboard(state_arc, ui_weak, cache_arc).await;
+                            });
+                        }
+                    });
+                }
+                SeanimeWsEvent::ProgressUpdated {
+                    media_id,
+                    episode_number,
+                } => {
+                    eprintln!(
+                        "[AMP] WebSocket: Progress updated for Media {} Ep {}",
+                        media_id, episode_number
+                    );
+                }
+                SeanimeWsEvent::ScanProgress { message } => {
+                    eprintln!("[AMP] WebSocket: Scan progress: {}", message);
+                }
+                _ => {}
+            }
+        }
+    });
 
     let mpv_render: Rc<RefCell<Option<MpvRenderCtx>>> = Rc::new(RefCell::new(None));
     let gl_resources: Rc<RefCell<Option<GLResources>>> = Rc::new(RefCell::new(None));
@@ -166,109 +343,125 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mpv_r = mpv_render.clone();
         let gl_res = gl_resources.clone();
 
-        ui.window().set_rendering_notifier(move |state, api| {
-            match state {
+        ui.window()
+            .set_rendering_notifier(move |rendering_state, api| match rendering_state {
                 slint::RenderingState::RenderingSetup => {
                     if let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = api {
-                            let api_type = CString::new("opengl").unwrap();
-                            let mut init_params = mpv_opengl_init_params {
-                                get_proc_address: Some(get_proc_address_mpv),
-                                get_proc_address_ctx: get_proc_address as *const _ as *mut c_void,
-                                extra_exts: std::ptr::null(),
-                            };
-                            let mut params = [
-                                mpv_render_param {
-                                    type_: mpv_render_param_type_MPV_RENDER_PARAM_API_TYPE,
-                                    data: api_type.as_ptr() as *mut c_void,
-                                },
-                                mpv_render_param {
-                                    type_: mpv_render_param_type_MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,
-                                    data: &mut init_params as *mut _ as *mut c_void,
-                                },
-                                mpv_render_param {
-                                    type_: 0,
-                                    data: ptr::null_mut(),
-                                },
-                            ];
+                        let api_type = CString::new("opengl").unwrap();
+                        let mut init_params = mpv_opengl_init_params {
+                            get_proc_address: Some(get_proc_address_mpv),
+                            get_proc_address_ctx: get_proc_address as *const _ as *mut c_void,
+                            extra_exts: std::ptr::null(),
+                        };
+                        let mut params = [
+                            mpv_render_param {
+                                type_: mpv_render_param_type_MPV_RENDER_PARAM_API_TYPE,
+                                data: api_type.as_ptr() as *mut c_void,
+                            },
+                            mpv_render_param {
+                                type_: mpv_render_param_type_MPV_RENDER_PARAM_OPENGL_INIT_PARAMS,
+                                data: &mut init_params as *mut _ as *mut c_void,
+                            },
+                            mpv_render_param {
+                                type_: 0,
+                                data: ptr::null_mut(),
+                            },
+                        ];
 
-                            let mut ctx: *mut mpv_render_context = ptr::null_mut();
-                            let res = unsafe { mpv_render_context_create(&mut ctx, mpv_h.get(), params.as_mut_ptr()) };
-                            if res >= 0 {
-                                *mpv_r.borrow_mut() = Some(MpvRenderCtx(ctx));
-                                eprintln!("[AMP] MPV Render Context created successfully");
-                            } else {
-                                eprintln!("[AMP] Failed to create MPV Render Context: {}", res);
-                            }
+                        let mut ctx: *mut mpv_render_context = ptr::null_mut();
+                        let res = unsafe {
+                            mpv_render_context_create(&mut ctx, mpv_h.get(), params.as_mut_ptr())
+                        };
+                        if res >= 0 {
+                            *mpv_r.borrow_mut() = Some(MpvRenderCtx(ctx));
+                            eprintln!("[AMP] MPV Render Context created successfully");
+                        } else {
+                            eprintln!("[AMP] Failed to create MPV Render Context: {}", res);
+                        }
                     }
                 }
                 slint::RenderingState::BeforeRendering => {
-                    if let Some(render_ctx) = mpv_r.borrow().as_ref() {
-                        if let Some(ui) = ui_weak.upgrade() {
-                            let sf = ui.window().scale_factor();
-                            let width = (ui.get_video_width() * sf) as u32;
-                            let height = (ui.get_video_height() * sf) as u32;
+                    if let Some(render_ctx) = mpv_r.borrow().as_ref()
+                        && let Some(ui) = ui_weak.upgrade()
+                    {
+                        let sf = ui.window().scale_factor();
+                        let raw_w = (ui.get_video_width() * sf) as u32;
+                        let raw_h = (ui.get_video_height() * sf) as u32;
 
-                            if width > 0 && height > 0 {
-                                let mut res_lock = gl_res.borrow_mut();
-                                if res_lock.as_ref().map_or(true, |r| r.width != width || r.height != height) {
-                                    if let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = api {
-                                        let gl = unsafe {
-                                            glow::Context::from_loader_function(|s| {
-                                                match CString::new(s) { Ok(name) => {
-                                                    get_proc_address(&name) as *const _
-                                                } _ => {
-                                                    std::ptr::null()
-                                                }}
-                                            })
-                                        };
-                                        *res_lock = Some(GLResources::new(gl, width, height));
-                                        eprintln!("[AMP] Created GL resources for {}x{} (SF: {})", width, height, sf);
+                        // Ensure even dimensions for planar color conversion & alignment
+                        let width = ((raw_w + 1) & !1).max(2);
+                        let height = ((raw_h + 1) & !1).max(2);
+
+                        if width > 0 && height > 0 {
+                            let mut res_lock = gl_res.borrow_mut();
+                            if res_lock
+                                .as_ref()
+                                .is_none_or(|r| r.width != width || r.height != height)
+                                && let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = api
+                            {
+                                let gl = unsafe {
+                                    glow::Context::from_loader_function(|s| match CString::new(s) {
+                                        Ok(name) => get_proc_address(&name) as *const _,
+                                        _ => std::ptr::null(),
+                                    })
+                                };
+                                *res_lock = Some(GLResources::new(gl, width, height));
+                            }
+
+                            if let Some(res) = res_lock.as_ref() {
+                                let mut fbo = mpv_opengl_fbo {
+                                    fbo: res.fbo.0.get() as i32,
+                                    w: width as i32,
+                                    h: height as i32,
+                                    internal_format: 0x8058, // GL_RGBA8
+                                };
+
+                                let mut params = [
+                                    mpv_render_param {
+                                        type_: mpv_render_param_type_MPV_RENDER_PARAM_OPENGL_FBO,
+                                        data: &mut fbo as *mut _ as *mut c_void,
+                                    },
+                                    mpv_render_param {
+                                        type_:
+                                            mpv_render_param_type_MPV_RENDER_PARAM_ADVANCED_CONTROL,
+                                        data: &mut 1 as *mut _ as *mut c_void,
+                                    },
+                                    mpv_render_param {
+                                        type_: 0,
+                                        data: ptr::null_mut(),
+                                    },
+                                ];
+
+                                unsafe {
+                                    // Reset OpenGL state that Slint's Femtovg renderer may have left behind
+                                    res.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(res.fbo));
+                                    res.gl.viewport(0, 0, width as i32, height as i32);
+                                    res.gl.disable(glow::SCISSOR_TEST);
+                                    res.gl.disable(glow::DEPTH_TEST);
+                                    res.gl.disable(glow::STENCIL_TEST);
+                                    res.gl.disable(glow::CULL_FACE);
+                                    res.gl.disable(glow::BLEND);
+                                    res.gl.clear_color(0.0, 0.0, 0.0, 1.0);
+                                    res.gl.clear(glow::COLOR_BUFFER_BIT);
+
+                                    let res_render = mpv_render_context_render(
+                                        render_ctx.get(),
+                                        params.as_mut_ptr(),
+                                    );
+                                    if res_render < 0 {
+                                        eprintln!("[AMP] Render error: {}", res_render);
                                     }
-                                }
 
-                                if let Some(res) = res_lock.as_ref() {
-                                    let mut fbo = mpv_opengl_fbo {
-                                        fbo: res.fbo.0.get() as i32,
-                                        w: width as i32,
-                                        h: height as i32,
-                                        internal_format: 0,
-                                    };
+                                    res.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
 
-                                    let mut params = [
-                                        mpv_render_param {
-                                            type_: mpv_render_param_type_MPV_RENDER_PARAM_OPENGL_FBO,
-                                            data: &mut fbo as *mut _ as *mut c_void,
-                                        },
-                                        mpv_render_param {
-                                            type_: mpv_render_param_type_MPV_RENDER_PARAM_ADVANCED_CONTROL,
-                                            data: &mut 1 as *mut _ as *mut c_void,
-                                        },
-                                        mpv_render_param {
-                                            type_: 0,
-                                            data: ptr::null_mut(),
-                                        },
-                                    ];
-
-                                    unsafe {
-                                        res.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(res.fbo));
-                                        res.gl.viewport(0, 0, width as i32, height as i32);
-                                        res.gl.clear_color(0.0, 0.0, 0.0, 1.0);
-                                        res.gl.clear(glow::COLOR_BUFFER_BIT);
-                                        res.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-
-                                        let res_render = mpv_render_context_render(render_ctx.get(), params.as_mut_ptr());
-                                        if res_render < 0 {
-                                            eprintln!("[AMP] Couldn't create context for {}x{} (SF: {})", width, height, res_render);
-                                        }
-
-                                        let image = BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(
+                                    let image =
+                                        BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(
                                             std::num::NonZeroU32::new(res.texture.0.get()).unwrap(),
                                             [width, height].into(),
                                         )
                                         .origin(BorrowedOpenGLTextureOrigin::TopLeft)
                                         .build();
-                                        ui.set_video_frame(image);
-                                    }
+                                    ui.set_video_frame(image);
                                 }
                             }
                         }
@@ -283,16 +476,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     *gl_res.borrow_mut() = None;
                 }
                 _ => {}
-            }
-        }).unwrap();
+            })
+            .unwrap();
     }
 
-    // --- Callbacks ---
+    // --- Search Callbacks ---
     let ui_search = ui.as_weak();
     let state_search = state.clone();
     let cache_search = cache.clone();
     ui.on_search(move |query| {
-        ui_search.upgrade().unwrap().set_is_loading(true);
+        if let Some(ui) = ui_search.upgrade() {
+            ui.set_is_loading(true);
+        }
 
         let ui_weak = ui_search.clone();
         let query_str = query.to_string();
@@ -328,37 +523,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let all_results = futures::future::join_all(all_results_futures).await;
 
             let _ = slint::invoke_from_event_loop(move || {
-                let ui = ui_weak.upgrade().unwrap();
+                if let Some(ui) = ui_weak.upgrade() {
+                    let mut ids = Vec::new();
+                    let mut grid_items = Vec::new();
 
-                let mut ids = Vec::new();
-                let mut grid_items = Vec::new();
+                    for (p_id, item, buffer) in all_results {
+                        ids.push((p_id, item.id.clone()));
 
-                for (p_id, item, buffer) in all_results {
-                    ids.push((p_id, item.id.clone()));
+                        grid_items.push(GridItem {
+                            id: item.id.into(),
+                            name: item.name.into(),
+                            thumbnail: buffer.map(image_from_raw).unwrap_or_default(),
+                            description: item.series_name.unwrap_or_default().into(),
+                            meta: "".into(),
+                            series_name: "".into(),
+                            is_folder: item.item_type == MediaItemType::Folder,
+                            index: item.index.unwrap_or(0),
+                            season_index: item.season_index.unwrap_or(0),
+                        });
+                    }
 
-                    grid_items.push(GridItem {
-                        id: item.id.into(),
-                        name: item.name.into(),
-                        thumbnail: buffer.map(image_from_raw).unwrap_or_default(),
-                        description: item.series_name.unwrap_or_default().into(),
-                        meta: "".into(),
-                        series_name: "".into(),
-                        is_folder: item.item_type == MediaItemType::Folder,
-                        index: item.index.unwrap_or(0),
-                        season_index: item.season_index.unwrap_or(0),
-                    });
+                    {
+                        let mut s = state_arc.lock().unwrap();
+                        s.search_results_ids = ids;
+                    }
+
+                    ui.set_search_results(slint::ModelRc::from(std::rc::Rc::new(
+                        slint::VecModel::from(grid_items),
+                    )));
+                    ui.set_is_loading(false);
                 }
-
-                {
-                    let mut s = state_arc.lock().unwrap();
-                    s.search_results_ids = ids;
-                }
-
-                ui.set_search_results(slint::ModelRc::from(std::rc::Rc::new(
-                    slint::VecModel::from(grid_items),
-                )));
-
-                ui.set_is_loading(false);
             });
         });
     });
@@ -366,6 +560,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ui_search_sel = ui.as_weak();
     let state_search_sel = state.clone();
     let cache_search_sel = cache.clone();
+    let mpv_search_sel = mpv.clone();
     ui.on_select_search_result(move |index| {
         let (p_id, item_id) = {
             let s = state_search_sel.lock().unwrap();
@@ -378,160 +573,196 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let ui_weak = ui_search_sel.clone();
-        let ui = ui_weak.upgrade().unwrap();
-
-        let state_arc = state_search_sel.clone();
-
+        let Some(ui) = ui_weak.upgrade() else { return };
         let item = ui.get_search_results().row_data(index as usize).unwrap();
 
-        ui.set_is_loading(true);
+        if item.is_folder {
+            ui.set_is_loading(true);
+            let state_arc = state_search_sel.clone();
+            let p_id_clone = p_id.clone();
+            let item_id_clone = item_id.clone();
 
-        let p_id_clone = p_id.clone();
-        let item_id_clone = item_id.clone();
+            {
+                let mut s = state_arc.lock().unwrap();
+                s.nav_stack.push((item_id.clone(), item.name.to_string()));
+            }
 
-        {
-            let mut s = state_arc.lock().unwrap();
-            s.nav_stack.push((item_id.clone(), item.name.to_string()));
+            let cache_search_s = cache_search_sel.clone();
+            tokio::spawn(async move {
+                let _ = load_folder(
+                    prov,
+                    p_id_clone,
+                    Some(item_id_clone),
+                    item.name.to_string(),
+                    ui_weak,
+                    state_arc,
+                    cache_search_s,
+                )
+                .await;
+            });
+        } else {
+            let mpv_h = mpv_search_sel.clone();
+            let state_arc = state_search_sel.clone();
+            tokio::spawn(async move {
+                play_episode_with_series_playlist(
+                    (p_id, prov),
+                    item_id,
+                    item.name.to_string(),
+                    item.series_name.to_string(),
+                    (item.season_index, item.index),
+                    ui_weak,
+                    state_arc,
+                    mpv_h,
+                )
+                .await;
+            });
         }
-
-        let cache_search_s = cache_search_sel.clone();
-        tokio::spawn(async move {
-            let _ = load_folder(
-                prov,
-                p_id_clone,
-                Some(item_id_clone),
-                item.name.to_string(),
-                ui_weak,
-                state_arc,
-                cache_search_s,
-            )
-            .await;
-        });
     });
 
+    // --- Provider Selection & Configuration ---
     let ui_prov_select = ui.as_weak();
-    let pm_prov_select = plugin_manager.clone();
+    let seanime_c_prov = seanime_client.clone();
     ui.on_select_provider(move |id| {
-        if let Some(ui) = ui_prov_select.upgrade() {
-            ui.set_selected_provider_id(id.clone());
-            let pm = pm_prov_select.lock().unwrap();
-            let fields = pm
-                .get_plugin(&id)
-                .map(|f| f.config_fields())
-                .unwrap_or_default();
-            let saved_config = pm.config.provider_configs.get(id.as_str());
-            let slint_fields: Vec<ConfigFieldMetadata> = fields
-                .into_iter()
-                .map(|f| {
-                    let value = saved_config
-                        .and_then(|c| c.get(&f.key))
-                        .cloned()
-                        .unwrap_or_else(|| f.default_value.clone());
-                    ConfigFieldMetadata {
-                        key: f.key.into(),
-                        label: f.label.into(),
-                        is_password: f.is_password,
-                        value: value.into(),
-                    }
-                })
-                .collect();
-            ui.set_config_fields(slint::ModelRc::from(std::rc::Rc::new(
-                slint::VecModel::from(slint_fields),
-            )));
-            ui.set_current_screen("login".into());
+        let Some(ui) = ui_prov_select.upgrade() else {
+            return;
+        };
+        ui.set_selected_provider_id(id.clone());
+        ui.set_error_message("".into());
+
+        let mut fields = Vec::new();
+        match id.as_str() {
+            "seanime" => {
+                fields.push(ConfigFieldMetadata {
+                    key: "server_url".into(),
+                    label: "Seanime Server URL".into(),
+                    is_password: false,
+                    value: seanime_c_prov.base_url().into(),
+                });
+            }
+            "parts" => {
+                let default_dir = extensions::bridge::get_parts_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "~/.config/amp/plugins/parts".to_string());
+
+                fields.push(ConfigFieldMetadata {
+                    key: "script_path".into(),
+                    label: "Parts Script Directory / Path".into(),
+                    is_password: false,
+                    value: default_dir.into(),
+                });
+            }
+            "local" => {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                let videos_dir = std::path::PathBuf::from(home).join("Videos");
+
+                fields.push(ConfigFieldMetadata {
+                    key: "media_dir".into(),
+                    label: "Local Videos Directory".into(),
+                    is_password: false,
+                    value: videos_dir.to_string_lossy().to_string().into(),
+                });
+            }
+            _ => {
+                fields.push(ConfigFieldMetadata {
+                    key: "endpoint".into(),
+                    label: "Extension Endpoint".into(),
+                    is_password: false,
+                    value: "".into(),
+                });
+            }
         }
+
+        ui.set_config_fields(slint::ModelRc::from(std::rc::Rc::new(
+            slint::VecModel::from(fields),
+        )));
+        ui.set_current_screen("login".into());
     });
 
     let ui_login_cb = ui.as_weak();
-    let pm_cb = plugin_manager.clone();
     let state_login = state.clone();
     let cache_login = cache.clone();
+    let parts_bridge_login = parts_bridge.clone();
     ui.on_login(move |provider_id, fields| {
-        let ui = ui_login_cb.upgrade().unwrap();
+        let Some(ui) = ui_login_cb.upgrade() else {
+            return;
+        };
         let mut config = std::collections::HashMap::new();
         for i in 0..fields.row_count() {
             if let Some(field) = fields.row_data(i) {
                 config.insert(field.key.to_string(), field.value.to_string());
             }
         }
+
         ui.set_is_loading(true);
         let ui_weak = ui_login_cb.clone();
-        let pm = pm_cb.clone();
         let state_arc = state_login.clone();
         let cache_arc = cache_login.clone();
-        let provider_id = provider_id.to_string();
+        let p_bridge = parts_bridge_login.clone();
+        let p_id = provider_id.to_string();
 
         tokio::spawn(async move {
-            let factory = pm.lock().unwrap().get_plugin(&provider_id);
-            if let Some(factory) = factory {
-                let client_res = factory.create_provider(config).await;
-                match client_res {
-                    Ok(client) => {
-                        {
-                            let mut pm_lock = pm.lock().unwrap();
-                            pm_lock
-                                .config
-                                .provider_configs
-                                .insert(provider_id.clone(), client.get_persistable_config());
-                            let _ = pm_lock.save_config();
-                        }
-
-                        {
-                            let mut s = state_arc.lock().unwrap();
-                            s.active_providers
-                                .insert(provider_id.clone(), client.clone());
-                        }
-
-                        let _ = slint::invoke_from_event_loop({
-                            let ui_weak = ui_weak.clone();
-                            let state_arc = state_arc.clone();
-                            let cache_arc = cache_arc.clone();
-                            move || {
-                                if let Some(ui) = ui_weak.upgrade() {
-                                    ui.set_current_screen("library".into());
-                                }
-                                tokio::spawn(async move {
-                                    let _ = load_dashboard(state_arc, ui_weak, cache_arc).await;
-                                });
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        let msg = format!("Login failed: {}", e);
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = ui_weak.upgrade() {
-                                ui.set_error_message(msg.into());
-                                ui.set_is_loading(false);
-                            }
-                        });
+            match p_id.as_str() {
+                "seanime" => {
+                    let server_url = config
+                        .get("server_url")
+                        .cloned()
+                        .unwrap_or_else(|| "http://192.168.1.250:3211".to_string());
+                    let new_client = Arc::new(SeanimeClient::new(server_url));
+                    let new_provider = Arc::new(SeanimeProvider::new(new_client.clone()));
+                    {
+                        let mut s = state_arc.lock().unwrap();
+                        s.active_providers
+                            .insert("seanime".to_string(), new_provider);
                     }
                 }
-            } else {
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = ui_weak.upgrade() {
-                        ui.set_error_message("Provider not found".into());
-                        ui.set_is_loading(false);
+                "parts" => {
+                    let _ = p_bridge.load_scripts();
+                }
+                "local" => {
+                    if let Some(dir) = config.get("media_dir") {
+                        let new_local = Arc::new(LocalProvider::with_dir(dir.clone()));
+                        let mut s = state_arc.lock().unwrap();
+                        s.active_providers.insert("local".to_string(), new_local);
                     }
-                });
+                }
+                _ => {}
             }
+
+            let _ = load_dashboard(state_arc, ui_weak.clone(), cache_arc).await;
+
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_current_screen("library".into());
+                    ui.set_is_loading(false);
+                }
+            });
         });
     });
 
+    // --- Item Selection Callbacks ---
     let ui_nav = ui.as_weak();
     let state_nav = state.clone();
     let mpv_nav = mpv.clone();
     let cache_nav = cache.clone();
     ui.on_select_item(move |index| {
-        let ui = ui_nav.upgrade().unwrap();
+        let Some(ui) = ui_nav.upgrade() else { return };
         let (p_id, item_id) = {
             let s = state_nav.lock().unwrap();
-            s.current_items_ids.get(index as usize).cloned().unwrap()
+            let Some(pair) = s.current_items_ids.get(index as usize).cloned() else {
+                return;
+            };
+            pair
         };
         let prov = {
             let s = state_nav.lock().unwrap();
-            s.active_providers.get(&p_id).cloned().unwrap()
+            let Some(p) = s.active_providers.get(&p_id).cloned() else {
+                return;
+            };
+            p
         };
-        let item = ui.get_current_items().row_data(index as usize).unwrap();
+        let Some(item) = ui.get_current_items().row_data(index as usize) else {
+            return;
+        };
 
         if item.is_folder {
             ui.set_is_loading(true);
@@ -561,41 +792,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ui_weak = ui_nav.clone();
             let state_arc = state_nav.clone();
 
-            let mut playlist_items = Vec::new();
-            {
-                let s = state_arc.lock().unwrap();
-                for (i, id_pair) in s.current_items_ids.iter().enumerate() {
-                    if let Some(it) = ui.get_current_items().row_data(i) {
-                        playlist_items.push(PlaylistItem {
-                            p_id: id_pair.0.clone(),
-                            item_id: id_pair.1.clone(),
-                            name: it.name.to_string(),
-                            series_name: it.series_name.to_string(),
-                            index: it.index,
-                            season_index: it.season_index,
-                        });
-                    }
-                }
-            }
-
-            {
-                let mut s = state_arc.lock().unwrap();
-                s.active_playlist = Some((playlist_items, index as usize));
-                s.current_title = item.name.to_string();
-                s.current_artist = item.series_name.to_string();
-
-                s.current_series_name = Some(item.series_name.to_string());
-                s.current_season_index = Some(item.season_index);
-                s.current_episode_index = Some(item.index);
-
-                s.current_item_id = Some((p_id, item_id))
-            }
-
-            ui.set_is_loading(true);
-            ui.set_current_screen("player".into());
-
             tokio::spawn(async move {
-                open_player(ui_weak, state_arc, mpv_h).await;
+                play_episode_with_series_playlist(
+                    (p_id, prov),
+                    item_id,
+                    item.name.to_string(),
+                    item.series_name.to_string(),
+                    (item.season_index, item.index),
+                    ui_weak,
+                    state_arc,
+                    mpv_h,
+                )
+                .await;
             });
         }
     });
@@ -606,53 +814,48 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_select_next_up(move |index| {
         let (p_id, item_id) = {
             let s = state_nu.lock().unwrap();
-            s.next_up_ids.get(index as usize).cloned().unwrap()
+            let Some(pair) = s.next_up_ids.get(index as usize).cloned() else {
+                return;
+            };
+            pair
         };
-        let ui = ui_nu.upgrade().unwrap();
-        let item = ui.get_next_up_list().row_data(index as usize).unwrap();
+        let Some(ui) = ui_nu.upgrade() else { return };
+        let Some(item) = ui.get_next_up_list().row_data(index as usize) else {
+            return;
+        };
 
-        {
-            let mut s = state_nu.lock().unwrap();
-            s.current_title = item.name.to_string();
-            s.current_artist = item.series_name.to_string();
-
-            let mut playlist_items = Vec::new();
-            for (i, id_pair) in s.next_up_ids.iter().enumerate() {
-                if let Some(it) = ui.get_next_up_list().row_data(i) {
-                    playlist_items.push(PlaylistItem {
-                        p_id: id_pair.0.clone(),
-                        item_id: id_pair.1.clone(),
-                        name: it.name.to_string(),
-                        series_name: it.series_name.to_string(),
-                        index: it.index,
-                        season_index: it.season_index,
-                    });
-                }
-            }
-            s.active_playlist = Some((playlist_items, index as usize));
-
-            s.current_series_name = Some(item.series_name.to_string());
-            s.current_season_index = Some(item.season_index);
-            s.current_episode_index = Some(item.index);
-
-            s.current_item_id = Some((p_id, item_id))
-        }
-
-        ui.set_is_loading(true);
-        ui.set_current_screen("player".into());
+        let prov = {
+            let s = state_nu.lock().unwrap();
+            let Some(p) = s.active_providers.get(&p_id).cloned() else {
+                return;
+            };
+            p
+        };
 
         let mpv_h = mpv_nu.clone();
         let ui_weak = ui_nu.clone();
         let state_arc = state_nu.clone();
 
-        tokio::spawn(async move { open_player(ui_weak, state_arc, mpv_h).await });
+        tokio::spawn(async move {
+            play_episode_with_series_playlist(
+                (p_id, prov),
+                item_id,
+                item.name.to_string(),
+                item.series_name.to_string(),
+                (item.season_index, item.index),
+                ui_weak,
+                state_arc,
+                mpv_h,
+            )
+            .await;
+        });
     });
 
     let ui_back = ui.as_weak();
     let state_back = state.clone();
     let cache_back = cache.clone();
     ui.on_back(move || {
-        let ui = ui_back.upgrade().unwrap();
+        let Some(ui) = ui_back.upgrade() else { return };
         let parent = {
             let mut s = state_back.lock().unwrap();
             s.nav_stack.pop();
@@ -687,18 +890,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mpv_stop = mpv.clone();
     let state_stop = state.clone();
     let cache_stop = cache.clone();
-    let extensions_close = extensions.clone();
+    let bridge_stop = parts_bridge.clone();
+    let discord_stop = discord.clone();
     ui.on_close_player(move || {
-        let ui = ui_stop.upgrade().unwrap();
+        let Some(ui) = ui_stop.upgrade() else { return };
         let mpv_h = mpv_stop.clone();
         let item_info = {
             let mut s = state_stop.lock().unwrap();
             s.current_item_id.take()
         };
 
-        for ext in extensions_close.iter() {
-            ext.on_playback_stop();
-        }
+        bridge_stop.notify_playback_stop();
+        discord_stop.on_playback_stop();
 
         if let Some((p_id, id)) = item_info {
             let prov = {
@@ -730,10 +933,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let p_clone = p.clone();
 
                 tokio::spawn(async move {
-                    let _ = p_clone.report_playback_progress(&id, time_i64, false).await;
                     let _ = p_clone.report_playback_stopped(&id, time_i64).await;
 
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
                     let (fid, pname) = {
                         let s = state_arc.lock().unwrap();
@@ -761,11 +963,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_mark_as_played(move |index, played| {
         let (p_id, item_id) = {
             let s = state_mark.lock().unwrap();
-            s.current_items_ids.get(index as usize).cloned().unwrap()
+            let Some(pair) = s.current_items_ids.get(index as usize).cloned() else {
+                return;
+            };
+            pair
         };
         let prov = {
             let s = state_mark.lock().unwrap();
-            s.active_providers.get(&p_id).cloned().unwrap()
+            let Some(p) = s.active_providers.get(&p_id).cloned() else {
+                return;
+            };
+            p
         };
         tokio::spawn(async move {
             let _ = prov.mark_as_played(&item_id, played).await;
@@ -870,26 +1078,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_next(move || {
         {
             let mut s = state_next.lock().unwrap();
-
-            if s.active_playlist.is_none() {
+            let Some((items, idx)) = s.active_playlist.as_mut() else {
                 return;
-            }
-
-            let (items, idx) = s.active_playlist.as_mut().unwrap();
-
+            };
             if *idx + 1 >= items.len() {
                 return;
             }
-
             *idx += 1;
             let item = items[*idx].clone();
             s.current_title = item.name.clone();
             s.current_artist = item.series_name.clone();
-
             s.current_series_name = Some(item.series_name.to_string());
             s.current_season_index = Some(item.season_index);
             s.current_episode_index = Some(item.index);
-
             s.current_item_id = Some((item.p_id, item.item_id));
         }
 
@@ -907,35 +1108,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.on_previous(move || {
         {
             let mut s = state_prev.lock().unwrap();
-
-            if s.active_playlist.is_none() {
+            let Some((items, idx)) = s.active_playlist.as_mut() else {
                 return;
-            }
-
-            let (items, idx) = s.active_playlist.as_mut().unwrap();
-
+            };
             if *idx == 0 {
                 return;
             }
-
             *idx -= 1;
-
             let item = items[*idx].clone();
-            
             s.current_title = item.name.clone();
             s.current_artist = item.series_name.clone();
-
             s.current_series_name = Some(item.series_name.to_string());
             s.current_season_index = Some(item.season_index);
             s.current_episode_index = Some(item.index);
-
             s.current_item_id = Some((item.p_id, item.item_id));
         }
 
         let mpv_h = mpv_prev.clone();
         let ui_weak = ui_prev.clone();
         let state_arc = state_prev.clone();
-
         tokio::spawn(async move {
             open_player(ui_weak, state_arc, mpv_h).await;
         });
@@ -945,7 +1136,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mpv_r = mpv_render.clone();
     let mpv_h = mpv.clone();
     let state_timer = state.clone();
-
+    let bridge_timer = parts_bridge.clone();
+    let discord_timer = discord.clone();
+    let seanime_prov_timer = seanime_provider.clone();
     let last_report = Arc::new(Mutex::new(std::time::Instant::now()));
     let last_ext_update = Arc::new(Mutex::new(std::time::Instant::now()));
 
@@ -967,7 +1160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     None => return,
                 };
 
-                if let Ok(last) = last_activity.clone().lock() {
+                if let Ok(last) = last_activity.lock() {
                     let is_p = ui.get_is_paused();
                     ui.set_controls_visible(
                         last.elapsed() < std::time::Duration::from_secs(3) || is_p,
@@ -988,16 +1181,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    if let Some(rctx) = mpv_r.borrow().as_ref() {
-                        if (mpv_render_context_update(rctx.get()) & 1) != 0 {
-                            ui.window().request_redraw();
-                        }
+                    if let Some(rctx) = mpv_r.borrow().as_ref()
+                        && (mpv_render_context_update(rctx.get()) & 1) != 0
+                    {
+                        ui.window().request_redraw();
                     }
 
                     let mut time: f64 = 0.0;
                     let mut dur: i64 = 0;
                     let mut perc: f64 = 0.0;
                     let mut paused: c_int = 0;
+
                     if mpv_get_property(
                         mpv_h.get(),
                         c_perc.as_ptr(),
@@ -1007,33 +1201,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     {
                         ui.set_progress(perc as f32);
                     }
+
                     let got_time = mpv_get_property(
                         mpv_h.get(),
                         c_time.as_ptr(),
                         mpv_format_MPV_FORMAT_DOUBLE,
                         &mut time as *mut _ as *mut c_void,
                     ) >= 0;
+
                     if got_time {
                         ui.set_time_pos(format_time(time as i64).into());
                     }
+
                     let got_dur = mpv_get_property(
                         mpv_h.get(),
                         c_dur.as_ptr(),
                         mpv_format_MPV_FORMAT_INT64,
                         &mut dur as *mut _ as *mut c_void,
                     ) >= 0;
-                    if got_dur {
-                        ui.set_duration(format_time(dur).into());
-                    }
 
+                    if got_dur && dur > 0 {
+                        ui.set_duration(format_time(dur).into());
+                        if let Ok(s) = state_arc.lock()
+                            && let Some((p_id, item_id)) = s.current_item_id.as_ref()
+                            && p_id == "seanime"
+                        {
+                            seanime_prov_timer.set_item_duration(item_id, dur as f64);
+                        }
+                    }
                     if got_time && got_dur {
                         let remaining_secs = dur - time as i64;
                         if remaining_secs >= 0 {
-                            ui.set_remaining_time(format!("-{}", format_time(remaining_secs)).into());
+                            ui.set_remaining_time(
+                                format!("-{}", format_time(remaining_secs)).into(),
+                            );
                             let current_time = chrono::Local::now();
                             if let Some(delta) = chrono::Duration::try_seconds(remaining_secs) {
                                 let end_time = current_time + delta;
-                                ui.set_ends_at(format!("ends at {}", end_time.format("%-I:%M %p")).into());
+                                ui.set_ends_at(
+                                    format!("ends at {}", end_time.format("%-I:%M %p")).into(),
+                                );
                             } else {
                                 ui.set_ends_at("".into());
                             }
@@ -1067,11 +1274,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ui.set_playback_speed(format!("{:.2}x", speed).into());
                     }
 
-                    if ui.get_current_screen() == "player" {
-                        if last_ext_update.lock().unwrap().elapsed()
-                            >= std::time::Duration::from_secs(1)
+                    // Extension updates & Discord RPC
+                    let is_in_player = ui.get_current_screen() == "player";
+                    if is_in_player {
+                        if let Ok(mut last) = last_ext_update.lock()
+                            && last.elapsed() >= std::time::Duration::from_millis(500)
                         {
-                            *last_ext_update.lock().unwrap() = std::time::Instant::now();
+                            *last = std::time::Instant::now();
+
+                            let time_ms = (time * 1000.0) as i64;
+                            extensions::bridge::ExtensionBridge::notify_time_update(
+                                &*bridge_timer,
+                                time_ms,
+                            );
+                            extensions::bridge::ExtensionBridge::notify_state_changed(
+                                &*bridge_timer,
+                                if paused != 0 { 0 } else { 1 },
+                            );
 
                             let info = {
                                 let s = state_arc.lock().unwrap();
@@ -1086,47 +1305,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     duration_secs: dur,
                                 }
                             };
-
-                            for ext in extensions.clone().iter() {
-                                ext.on_playback_update(info.clone());
-                            }
+                            bridge_timer.notify_playback_update(info.clone());
+                            discord_timer.on_playback_update(info);
                         }
                     } else {
-                        if last_ext_update.lock().unwrap().elapsed()
-                            >= std::time::Duration::from_secs(1)
+                        if let Ok(mut last) = last_ext_update.lock()
+                            && last.elapsed() >= std::time::Duration::from_secs(1)
                         {
-                            *last_ext_update.lock().unwrap() = std::time::Instant::now();
-                            for ext in extensions.clone().iter() {
-                                ext.on_playback_stop();
-                            }
+                            *last = std::time::Instant::now();
+                            discord_timer.on_playback_stop();
                         }
                     }
 
-                    if let Ok(mut last) = last_report.lock() {
-                        if last.elapsed() >= std::time::Duration::from_secs(10) {
-                            *last = std::time::Instant::now();
+                    // Periodic Progress Sync to Providers (every 1 second)
+                    if is_in_player
+                        && got_time
+                        && time > 0.0
+                        && let Ok(mut last) = last_report.lock()
+                        && last.elapsed() >= std::time::Duration::from_secs(1)
+                    {
+                        *last = std::time::Instant::now();
 
-                            let report_data = {
-                                let s = state_arc.lock().unwrap();
-                                s.current_item_id.as_ref().and_then(|(p_id, id)| {
-                                    s.active_providers
-                                        .get(p_id)
-                                        .map(|p| (p.clone(), id.clone(), p_id.clone()))
-                                })
-                            };
+                        let report_data = {
+                            let s = state_arc.lock().unwrap();
+                            s.current_item_id.as_ref().and_then(|(p_id, id)| {
+                                s.active_providers
+                                    .get(p_id)
+                                    .map(|p| (p.clone(), id.clone(), p_id.clone()))
+                            })
+                        };
 
-                            if let Some((provider, item_id, provider_id)) = report_data {
-                                eprintln!("[AMP] Syncing progress to: {}", provider_id);
-
-                                let time_i64 = time as i64;
-                                let is_paused = paused != 0;
-
-                                tokio::spawn(async move {
-                                    let _ = provider
-                                        .report_playback_progress(&item_id, time_i64, is_paused)
-                                        .await;
-                                });
-                            }
+                        if let Some((provider, item_id, _p_id)) = report_data {
+                            let time_i64 = time as i64;
+                            let is_p = paused != 0;
+                            tokio::spawn(async move {
+                                let _ = provider
+                                    .report_playback_progress(&item_id, time_i64, is_p)
+                                    .await;
+                            });
                         }
                     }
                 }
@@ -1134,119 +1350,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
 
-    let saved_configs = plugin_manager
-        .lock()
-        .unwrap()
-        .config
-        .provider_configs
-        .clone();
+    // Initial Dashboard Load
+    eprintln!("[AMP] Loading initial dashboard from Seanime...");
+    ui.set_is_loading(true);
+    ui.set_current_screen("library".into());
 
-    if !saved_configs.is_empty() {
-        ui.set_is_loading(true);
-
-        let ui_weak = ui.as_weak();
-        let pm = plugin_manager.clone();
-        let state_arc = state.clone();
-        let cache_arc = cache.clone();
-
-        tokio::spawn(async move {
-            let init_tasks = {
-                let lock = pm.lock().unwrap();
-
-                saved_configs
-                    .into_iter()
-                    .filter_map(|(id, config)| {
-                        lock.get_plugin(&id).map(|factory| (id, factory, config))
-                    })
-                    .collect::<Vec<_>>()
-            };
-
-            let results: Vec<_> = futures::future::join_all(init_tasks.into_iter().map(
-                |(id, factory, config)| async move {
-                    match factory.create_provider(config).await {
-                        Ok(client) => Some((id, client)),
-                        Err(e) => {
-                            eprintln!("[AMP] Error initializing plugin {}: {}", id, e);
-                            None
-                        }
-                    }
-                },
-            ))
-            .await
-            .into_iter()
-            .flatten()
-            .collect();
-
-            if !results.is_empty() {
-                let mut s = state_arc.lock().unwrap();
-                for (id, client) in results {
-                    eprintln!("[AMP] Successfully initialized plugin {}", id);
-                    s.active_providers.insert(id, client);
-                }
+    let ui_init = ui.as_weak();
+    let state_init = state.clone();
+    let cache_init = cache.clone();
+    tokio::spawn(async move {
+        let _ = load_dashboard(state_init, ui_init.clone(), cache_init).await;
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = ui_init.upgrade() {
+                ui.set_is_loading(false);
             }
-
-            let _ = load_dashboard(state_arc, ui_weak.clone(), cache_arc).await;
-
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(ui) = ui_weak.upgrade() {
-                    ui.set_is_loading(false);
-                }
-            });
         });
-    }
+    });
 
-    eprintln!("[AMP] Entering main loop...");
-
+    eprintln!("[AMP] Entering Slint event loop...");
     let result = ui.run();
+    eprintln!("[AMP] Event loop exited.");
 
-    eprintln!("[AMP] Main loop exited.");
-
-    mpv.stop();
+    MpvHandle::stop(&mpv);
     Ok(result?)
 }
 
-unsafe fn update_tracks(ui: &PlayerWindow, mpv_h: *mut mpv_handle) {
+unsafe fn update_tracks(ui: &AppWindow, mpv_h: *mut mpv_handle) {
     let c_tracks = CString::new("track-list").unwrap();
     let tptr = unsafe { mpv_get_property_string(mpv_h, c_tracks.as_ptr()) };
     if !tptr.is_null() {
         let js = unsafe { CStr::from_ptr(tptr) }.to_string_lossy();
-        match serde_json::from_str::<Vec<Track>>(&js) {
-            Ok(tracks) => {
-                let mut alist = Vec::new();
-                let mut slist = Vec::new();
-                let mut active_audio_name = "Default".to_string();
-                let mut active_sub_name = "None".to_string();
+        if let Ok(tracks) = serde_json::from_str::<Vec<Track>>(&js) {
+            let mut alist = Vec::new();
+            let mut slist = Vec::new();
+            let mut active_audio_name = "Default".to_string();
+            let mut active_sub_name = "None".to_string();
 
-                for t in &tracks {
-                    let track_info = t.as_track_info();
-                    if t.active {
-                        match t.track_type {
-                            TrackType::Audio => active_audio_name = track_info.name.to_string(),
-                            TrackType::Sub => active_sub_name = track_info.name.to_string(),
-                            _ => (),
-                        }
-                    }
+            for t in &tracks {
+                let track_info = t.as_track_info();
+                if t.active {
                     match t.track_type {
-                        TrackType::Audio => alist.push(track_info),
-                        TrackType::Sub => slist.push(track_info),
+                        TrackType::Audio => active_audio_name = track_info.name.to_string(),
+                        TrackType::Sub => active_sub_name = track_info.name.to_string(),
                         _ => (),
                     }
                 }
-
-                ui.set_audio_tracks(slint::ModelRc::from(std::rc::Rc::new(
-                    slint::VecModel::from(alist),
-                )));
-
-                ui.set_subtitle_tracks(slint::ModelRc::from(std::rc::Rc::new(
-                    slint::VecModel::from(slist),
-                )));
-
-                ui.set_audio_track_name(active_audio_name.into());
-                ui.set_subtitle_track_name(active_sub_name.into());
+                match t.track_type {
+                    TrackType::Audio => alist.push(track_info),
+                    TrackType::Sub => slist.push(track_info),
+                    _ => (),
+                }
             }
-            Err(e) => {
-                eprintln!("[AMP] Error parsing tracks JSON: {:?}. JSON was: {}", e, js);
-            }
+
+            ui.set_audio_tracks(slint::ModelRc::from(std::rc::Rc::new(
+                slint::VecModel::from(alist),
+            )));
+            ui.set_subtitle_tracks(slint::ModelRc::from(std::rc::Rc::new(
+                slint::VecModel::from(slist),
+            )));
+            ui.set_audio_track_name(active_audio_name.into());
+            ui.set_subtitle_track_name(active_sub_name.into());
         }
         unsafe { mpv_free(tptr as *mut c_void) };
     }

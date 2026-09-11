@@ -14,7 +14,8 @@ impl GLResources {
         unsafe {
             let texture = gl.create_texture().expect("Failed to create texture");
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-
+            gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 4);
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,

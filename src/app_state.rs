@@ -1,7 +1,7 @@
-use amp_api::DynProvider;
+use crate::api::DynProvider;
 use std::collections::HashMap;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct PlaylistItem {
     pub p_id: String,
     pub item_id: String,
@@ -42,5 +42,11 @@ impl AppState {
             current_episode_index: None,
             active_providers: HashMap::new(),
         }
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
     }
 }
