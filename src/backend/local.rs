@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use super::{MediaMetadata, MediaProvider as AppMediaProvider};
-use crate::api::{AmpError, MediaItem, MediaItemType, MediaProvider, RawImage};
+use crate::api::{AmpError, ConfigField, MediaItem, MediaItemType, MediaProvider, RawImage};
 use crate::player::SessionError;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -34,10 +34,6 @@ impl Default for LocalProvider {
 
 #[async_trait]
 impl AppMediaProvider for LocalProvider {
-    fn id(&self) -> &'static str {
-        "local"
-    }
-
     async fn resolve_stream(&self, uri: &str) -> Result<String, SessionError> {
         if let Some(path) = uri.strip_prefix("file://") {
             return Ok(path.to_string());
@@ -195,15 +191,6 @@ impl MediaProvider for LocalProvider {
         Err(AmpError::Provider("No image".into()))
     }
 
-    fn get_persistable_config(&self) -> HashMap<String, String> {
-        let mut map = HashMap::new();
-        map.insert(
-            "media_dir".to_string(),
-            self.media_dir.to_string_lossy().to_string(),
-        );
-        map
-    }
-
     async fn get_resume_position(&self, _item_id: &str) -> Result<Option<i64>, AmpError> {
         Ok(None)
     }
@@ -232,6 +219,18 @@ impl MediaProvider for LocalProvider {
     async fn mark_as_played(&self, _item_id: &str, _played: bool) -> Result<(), AmpError> {
         Ok(())
     }
+
+    // fn get_config_fields(&self) -> Vec<ConfigField> {
+    //     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    //     let videos_dir = PathBuf::from(home).join("Videos").into_string().unwrap();
+
+    //     vec![ConfigField {
+    //         key: "media_dir".to_string(),
+    //         label: "Dir".to_string(),
+    //         is_password: false,
+    //         default_value: videos_dir,
+    //     }]
+    // }
 }
 
 fn is_video_file(path: &Path) -> bool {

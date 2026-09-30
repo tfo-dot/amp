@@ -1,7 +1,8 @@
 use crate::app_state::AppState;
 use libmpv_sys::*;
 use slint::Weak;
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
+use std::mem::MaybeUninit;
 use std::os::raw::c_void;
 use std::ptr;
 use std::sync::{Arc, Mutex};
@@ -18,7 +19,8 @@ impl MpvHandle {
                 panic!("Failed to create mpv context");
             }
 
-            let cache_opts = [
+            let opts = [
+                //Cache
                 ("vo", "libmpv"),
                 ("gpu-api", "opengl"),
                 ("hwdec", "no"),
@@ -29,9 +31,11 @@ impl MpvHandle {
                 ("terminal", "yes"),
                 ("stop-screensaver", "yes"),
                 ("network-timeout", "10"),
+                //User scripts
+                ("config", "yes"),
             ];
 
-            for (opt, val) in cache_opts {
+            for (opt, val) in opts {
                 let c_opt = CString::new(opt).unwrap();
                 let c_val = CString::new(val).unwrap();
                 mpv_set_property_string(handle, c_opt.as_ptr(), c_val.as_ptr());
@@ -52,6 +56,23 @@ impl MpvHandle {
 
             let c_warn = CString::new("warn").unwrap();
             mpv_request_log_messages(handle, c_warn.as_ptr());
+
+            let prop = CString::new("input-bindings").unwrap();
+            let mut root_node = MaybeUninit::<mpv_node>::uninit();
+
+            // Pobranie właściwości jako węzeł strukturalny (MPV_FORMAT_NODE)
+            let err = mpv_get_property(
+                handle,
+                prop.as_ptr(),
+                mpv_format_MPV_FORMAT_NODE,
+                root_node.as_mut_ptr() as *mut _,
+            );
+
+            if err < 0 {
+                let err_c_str = CStr::from_ptr(mpv_error_string(err));
+                eprintln!("Błąd odczytu właściwości: {:?}", err_c_str);
+                return MpvHandle(handle);
+            }
 
             MpvHandle(handle)
         }
@@ -151,7 +172,7 @@ pub async fn open_player(
             i_id, provider_id
         );
 
-        (state.active_providers.get(&provider_id).cloned(), i_id)
+        (state.active_providers.get_provider(&provider_id), i_id)
     };
 
     let provider = match provider {

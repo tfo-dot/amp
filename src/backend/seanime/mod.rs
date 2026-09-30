@@ -1,12 +1,15 @@
-#![allow(unused_imports, dead_code)]
 pub mod client;
 pub mod ws;
 
 pub use client::SeanimeClient;
+use tokio::sync::mpsc::UnboundedSender;
 pub use ws::{SeanimeWsEvent, SeanimeWsListener, SeanimeWsSender};
 
 use super::{MediaMetadata, MediaProvider as AppMediaProvider};
-use crate::api::{AmpError, MediaItem, MediaItemType, MediaProvider, RawImage};
+use crate::api::{
+    self, AmpError, ConfigField, DynProvider, MediaItem, MediaItemType, MediaProvider,
+    PlaybackExtension, Plugin, PluginEvent, RawImage,
+};
 use crate::player::SessionError;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -24,8 +27,8 @@ pub struct SeanimeProvider {
 }
 
 impl SeanimeProvider {
-    pub fn new(client: Arc<SeanimeClient>) -> Self {
-        Self {
+    pub fn new(client: Arc<SeanimeClient>, sender: UnboundedSender<PluginEvent>) -> Self {
+        let sp = Self {
             client,
             raw_file_paths: Arc::new(RwLock::new(HashMap::new())),
             stream_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -33,11 +36,38 @@ impl SeanimeProvider {
             durations: Arc::new(RwLock::new(HashMap::new())),
             total_episodes: Arc::new(RwLock::new(HashMap::new())),
             ws_sender: Arc::new(RwLock::new(None)),
-        }
-    }
+        };
+        //Seanime WebSocket listener
+        let ws_listener = SeanimeWsListener::new();
+        sp.set_ws_sender(ws_listener.sender());
+        let (ws_tx, mut ws_rx) = tokio::sync::mpsc::unbounded_channel::<SeanimeWsEvent>();
+        let _ws_handle = ws_listener.start(sp.client.base_url().to_string(), ws_tx);
+        tokio::spawn(async move {
+            while let Some(event) = ws_rx.recv().await {
+                match event {
+                    SeanimeWsEvent::LibraryUpdated => {
+                        let _ = sender.send(PluginEvent::ReloadDashboard);
 
-    pub fn default_local() -> Self {
-        Self::new(Arc::new(SeanimeClient::default_local()))
+                        eprintln!("[Seanime WS]: Library updated, refreshing dashboard");
+                    }
+                    SeanimeWsEvent::ProgressUpdated {
+                        media_id,
+                        episode_number,
+                    } => {
+                        eprintln!(
+                            "[AMP] WebSocket: Progress updated for Media {} Ep {}",
+                            media_id, episode_number
+                        );
+                    }
+                    SeanimeWsEvent::ScanProgress { message } => {
+                        eprintln!("[AMP] WebSocket: Scan progress: {}", message);
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        sp
     }
 
     pub fn client(&self) -> &Arc<SeanimeClient> {
@@ -94,10 +124,6 @@ impl SeanimeProvider {
 
 #[async_trait]
 impl AppMediaProvider for SeanimeProvider {
-    fn id(&self) -> &'static str {
-        "seanime"
-    }
-
     async fn resolve_stream(&self, uri: &str) -> Result<String, SessionError> {
         if let Some(path) = uri.strip_prefix("seanime://file/") {
             let playable = self.resolve_raw_path_to_playable(path);
@@ -464,12 +490,6 @@ impl MediaProvider for SeanimeProvider {
         Err(AmpError::Provider("No thumbnail available".into()))
     }
 
-    fn get_persistable_config(&self) -> HashMap<String, String> {
-        let mut map = HashMap::new();
-        map.insert("base_url".to_string(), self.client.base_url().to_string());
-        map
-    }
-
     async fn get_resume_position(&self, item_id: &str) -> Result<Option<i64>, AmpError> {
         if let Some(rest) = item_id.strip_prefix("ep_") {
             let parts: Vec<&str> = rest.split('_').collect();
@@ -645,5 +665,47 @@ impl MediaProvider for SeanimeProvider {
             }
         }
         Ok(())
+    }
+}
+
+pub struct SeanimePlugin {}
+
+impl Plugin for SeanimePlugin {
+    fn id(&self) -> String {
+        "seanime".to_string()
+    }
+    fn visible_name(&self) -> String {
+        "Seanime".to_string()
+    }
+
+    fn create_provider(
+        &self,
+        config: HashMap<String, String>,
+        channel: UnboundedSender<PluginEvent>,
+    ) -> Option<Result<Arc<dyn MediaProvider + 'static>, AmpError>> {
+        let url = config.get("base_url").cloned();
+
+        if let Some(url) = url {
+            let seanime_client = Arc::new(SeanimeClient::new(url));
+            Some(Ok(Arc::new(SeanimeProvider::new(seanime_client, channel))))
+        } else {
+            Some(Err(AmpError::Plugin("Missing url".into())))
+        }
+    }
+
+    fn get_config_fields(&self) -> Vec<ConfigField> {
+        vec![ConfigField {
+            key: "base_url".to_string(),
+            label: "Seanime server address".to_string(),
+            is_password: false,
+            default_value: "http://localhost:43211".to_string(),
+        }]
+    }
+    fn create_extension(
+        &self,
+        _: HashMap<String, String>,
+        _: UnboundedSender<PluginEvent>,
+    ) -> Option<Result<Arc<dyn PlaybackExtension + 'static>, AmpError>> {
+        None
     }
 }

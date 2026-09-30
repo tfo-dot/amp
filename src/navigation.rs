@@ -1,6 +1,7 @@
 use crate::api::{AmpError, DynProvider, MediaItemType, RawImage};
-use crate::app_state::AppState;
+use crate::app_state::{AppState, PlaylistItem};
 use crate::image_cache::ImageCache;
+use crate::player::{MpvHandle, open_player};
 use crate::{AppWindow, GridItem};
 use slint::{Image, Model, SharedPixelBuffer, Weak};
 use std::sync::{Arc, Mutex};
@@ -122,7 +123,7 @@ pub async fn load_dashboard(
 ) -> Result<(), AmpError> {
     let providers = {
         let state = state_arc.lock().unwrap();
-        state.active_providers.clone()
+        state.active_providers.get_providers()
     };
 
     let mut fetch_futures = Vec::new();
@@ -131,6 +132,7 @@ pub async fn load_dashboard(
         let cache_clone = cache.clone();
         fetch_futures.push(async move {
             let mut results = Vec::new();
+
             if let Ok(next_up) = client.get_next_up().await {
                 for s in next_up {
                     let client_clone = client.clone();
@@ -166,13 +168,7 @@ pub async fn load_dashboard(
                         item.index.unwrap_or(0)
                     )
                     .into(),
-                    meta: if p_id == "jellyfin" {
-                        "Jellyfin".into()
-                    } else if p_id == "animepahe" {
-                        "Animepahe".into()
-                    } else {
-                        p_id.clone().into()
-                    },
+                    meta: p_id.clone().into(),
                     series_name: item.series_name.unwrap_or_default().into(),
                     is_folder: false,
                     index: item.index.unwrap_or(0),
@@ -193,4 +189,108 @@ pub async fn load_dashboard(
     });
 
     Ok(())
+}
+
+//Prov is (id, provider), position: (series, ep)
+pub async fn play_episode_with_series_playlist(
+    provider_id: String,
+    item_id: String,
+    item: GridItem,
+    ui_weak: Weak<AppWindow>,
+    state_arc: Arc<Mutex<AppState>>,
+    mpv: MpvHandle,
+) {
+    let mut playlist_items = Vec::new();
+    let mut current_idx = 0;
+
+    let provider = {
+        let s = state_arc.lock().unwrap();
+        s.active_providers.get_provider(&provider_id).unwrap()
+    };
+
+    // Check if we can load the full series playlist from the provider
+    if let Some(rest) = item_id.strip_prefix("ep_") {
+        let parts: Vec<&str> = rest.split('_').collect();
+        if parts.len() >= 2 {
+            let media_id = parts[0];
+            let folder_id = format!("media_{}", media_id);
+            if let Ok(children) = provider.get_children(&folder_id).await {
+                for (idx, child) in children.into_iter().enumerate() {
+                    if child.id == item_id {
+                        current_idx = idx;
+                    }
+                    playlist_items.push(PlaylistItem {
+                        p_id: provider_id.clone(),
+                        item_id: child.id,
+                        name: child.name,
+                        series_name: child
+                            .series_name
+                            .unwrap_or_else(|| item.series_name.to_string()),
+                        index: child.index.unwrap_or(0),
+                        season_index: child.season_index.unwrap_or(0),
+                    });
+                }
+            }
+        }
+    }
+
+    // Fallback if playlist is empty: check state.current_items_ids
+    if playlist_items.is_empty() {
+        let s = state_arc.lock().unwrap();
+        if let Some(ui) = ui_weak.upgrade() {
+            let model = ui.get_current_items();
+            for (i, id_pair) in s.current_items_ids.iter().enumerate() {
+                if let Some(it) = model.row_data(i)
+                    && !it.is_folder
+                {
+                    if id_pair.1 == item_id {
+                        current_idx = playlist_items.len();
+                    }
+                    playlist_items.push(PlaylistItem {
+                        p_id: id_pair.0.clone(),
+                        item_id: id_pair.1.clone(),
+                        name: it.name.to_string(),
+                        series_name: it.series_name.to_string(),
+                        index: it.index,
+                        season_index: it.season_index,
+                    });
+                }
+            }
+        }
+    }
+
+    // Final fallback
+    if playlist_items.is_empty() {
+        playlist_items.push(PlaylistItem {
+            p_id: provider_id.clone(),
+            item_id: item_id.clone(),
+            name: item.name.to_string(),
+            series_name: item.series_name.to_string(),
+            season_index: item.season_index,
+            index: item.index,
+        });
+    }
+
+    {
+        let mut s = state_arc.lock().unwrap();
+        s.active_playlist = Some((playlist_items, current_idx));
+        s.current_title = item.name.to_string();
+        s.current_artist = item.series_name.to_string();
+        s.current_series_name = Some(item.series_name.to_string());
+        s.current_season_index = Some(item.season_index);
+        s.current_episode_index = Some(item.index);
+        s.current_item_id = Some((provider_id, item_id));
+    }
+
+    let _ = slint::invoke_from_event_loop({
+        let ui_weak = ui_weak.clone();
+        move || {
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_is_loading(true);
+                ui.set_current_screen("player".into());
+            }
+        }
+    });
+
+    open_player(ui_weak, state_arc, mpv).await;
 }

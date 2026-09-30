@@ -75,8 +75,24 @@ component ExtensionTile inherits Rectangle {
 }
 
 export component AppWindow inherits Window {
-    title: "AMP - Advanced Media Player";
+    title: "AMP";
     background: #0b0b0b;
+
+    forward-focus: key-handler;
+
+    callback key-pressed(string /* text */, bool /* ctrl */, bool /* alt */, bool /* shift */);
+
+    key-handler := FocusScope {
+        key-pressed(event) => {
+            root.key-pressed(
+                event.text,
+                event.modifiers.control,
+                event.modifiers.alt,
+                event.modifiers.shift
+            );
+            accept
+        }
+    }
 
     // Callbacks
     callback toggle_pause();

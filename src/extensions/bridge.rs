@@ -1,8 +1,10 @@
 #![allow(unused_imports, dead_code)]
 use super::ExtensionError;
 use crate::api::{
-    AmpError, MediaItem, MediaItemType, MediaProvider, PlaybackController, PlaybackInfo, RawImage,
+    AmpError, ConfigField, MediaItem, MediaItemType, MediaProvider, PlaybackController,
+    PlaybackInfo, RawImage,
 };
+use crate::extensions::{self, ExtensionWatcher};
 use async_trait::async_trait;
 use parts::engine::Engine;
 use parts::value::{FromValue, IntoValue, Value, parts_native};
@@ -20,9 +22,11 @@ static GLOBAL_STATE: LazyLock<RwLock<HashMap<String, serde_json::Value>>> =
 static PLAYBACK_CONTROLLER: LazyLock<Mutex<Option<Arc<dyn PlaybackController>>>> =
     LazyLock::new(|| Mutex::new(None));
 // Global UI slot mutation dispatcher
+#[allow(clippy::type_complexity)]
 static UI_SLOT_DISPATCHER: LazyLock<Mutex<Option<Arc<dyn Fn(i64, i64) + Send + Sync>>>> =
     LazyLock::new(|| Mutex::new(None));
 // Global VM command dispatcher
+#[allow(clippy::type_complexity)]
 static VM_COMMAND_DISPATCHER: LazyLock<
     Mutex<Option<Arc<dyn Fn(i64, i64) -> Result<(), String> + Send + Sync>>>,
 > = LazyLock::new(|| Mutex::new(None));
@@ -1312,10 +1316,6 @@ impl MediaProvider for PartsExtensionBridge {
         Err(AmpError::Provider("Image buffer not available".into()))
     }
 
-    fn get_persistable_config(&self) -> HashMap<String, String> {
-        self.config.clone()
-    }
-
     async fn get_resume_position(&self, item_id: &str) -> Result<Option<i64>, AmpError> {
         let scripts = self.scripts.read().unwrap().clone();
         for script in &scripts {
@@ -1469,6 +1469,11 @@ impl MediaProvider for PartsExtensionBridge {
         }
         Ok(())
     }
+
+    // fn get_config_fields(&self) -> Vec<ConfigField> {
+    //     //TODO make it work after rewrite
+    //     vec![]
+    // }
 }
 
 #[cfg(test)]
@@ -1552,8 +1557,7 @@ mod tests {
         // 2. Test state changes
         bridge.notify_state_changed(1);
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let state_val =
-            parts_get_state(&[Value::String("last_state".to_string().into())]).unwrap();
+        let state_val = parts_get_state(&[Value::String("last_state".to_string().into())]).unwrap();
         assert_eq!(state_val, Value::Int(1));
 
         let play_hook =
@@ -1564,10 +1568,8 @@ mod tests {
         assert!(cmd_res.is_ok());
         std::thread::sleep(std::time::Duration::from_millis(50));
 
-        let last_cmd =
-            parts_get_state(&[Value::String("last_vm_cmd".to_string().into())]).unwrap();
-        let last_arg =
-            parts_get_state(&[Value::String("last_vm_arg".to_string().into())]).unwrap();
+        let last_cmd = parts_get_state(&[Value::String("last_vm_cmd".to_string().into())]).unwrap();
+        let last_arg = parts_get_state(&[Value::String("last_vm_arg".to_string().into())]).unwrap();
         assert_eq!(last_cmd, Value::Int(42));
         assert_eq!(last_arg, Value::Int(9999));
 

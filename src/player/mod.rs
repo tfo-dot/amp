@@ -1,11 +1,9 @@
 #![allow(unused_imports, dead_code)]
 pub mod fbo;
 pub mod mpv;
-pub mod pipeline;
 
 pub use fbo::GLResources;
 pub use mpv::{MpvHandle, MpvRenderCtx, open_player};
-pub use pipeline::configure_hardware_acceleration;
 
 use thiserror::Error;
 

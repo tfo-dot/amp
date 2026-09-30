@@ -1,6 +1,10 @@
 #![allow(dead_code)]
+use crate::SeanimeWsEvent;
+use crate::SeanimeWsListener;
+use crate::api::PluginEvent;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Error, Debug)]
 pub enum SeanimeError {
@@ -342,6 +346,7 @@ impl SeanimeClient {
         if url.ends_with('/') {
             url.pop();
         }
+
         Self {
             base_url: url,
             http_client: reqwest::Client::builder()
@@ -349,10 +354,6 @@ impl SeanimeClient {
                 .build()
                 .unwrap_or_default(),
         }
-    }
-
-    pub fn default_local() -> Self {
-        Self::new("http://192.168.1.250:3211")
     }
 
     pub fn base_url(&self) -> &str {

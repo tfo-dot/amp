@@ -1,7 +1,49 @@
+use crate::PluginEvent;
+use crate::api::AmpError;
+use crate::api::ConfigField;
+use crate::api::MediaProvider;
+use crate::api::Plugin;
 use crate::api::{PlaybackExtension, PlaybackInfo};
 use discord_rich_presence::{DiscordIpc, DiscordIpcClient, activity};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::sync::mpsc::UnboundedSender;
+
+pub struct DiscordPlugin {}
+
+impl Plugin for DiscordPlugin {
+    fn id(&self) -> String {
+        "seanime".to_string()
+    }
+    fn visible_name(&self) -> String {
+        "Seanime".to_string()
+    }
+
+    fn create_provider(
+        &self,
+        _config: HashMap<String, String>,
+        _channel: UnboundedSender<PluginEvent>,
+    ) -> Option<Result<Arc<dyn MediaProvider + 'static>, AmpError>> {
+        None
+    }
+
+    fn get_config_fields(&self) -> Vec<ConfigField> {
+        vec![ConfigField {
+            key: "base_url".to_string(),
+            label: "Seanime server address".to_string(),
+            is_password: false,
+            default_value: "http://localhost:43211".to_string(),
+        }]
+    }
+    fn create_extension(
+        &self,
+        _: HashMap<String, String>,
+        _: UnboundedSender<PluginEvent>,
+    ) -> Option<Result<Arc<dyn PlaybackExtension + 'static>, AmpError>> {
+        Some(Ok(Arc::new(DiscordRPC::new())))
+    }
+}
 
 pub struct DiscordRPC {
     client: Arc<Mutex<Option<DiscordIpcClient>>>,

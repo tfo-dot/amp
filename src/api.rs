@@ -46,6 +46,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MediaItemType {
@@ -88,10 +89,6 @@ pub trait MediaProvider: Send + Sync {
     fn get_stream_url(&self, item_id: &str) -> String;
     async fn get_item_image_buffer(&self, item_id: &str) -> Result<RawImage, AmpError>;
 
-    //It's used in /bridge and /extensions modules
-    #[allow(dead_code)]
-    fn get_persistable_config(&self) -> HashMap<String, String>;
-
     async fn get_resume_position(&self, item_id: &str) -> Result<Option<i64>, AmpError>;
     async fn report_playback_start(&self, item_id: &str) -> Result<(), AmpError>;
     async fn report_playback_progress(
@@ -126,6 +123,7 @@ pub trait PlaybackExtension: Send + Sync {
     fn on_playback_update(&self, info: PlaybackInfo);
     fn on_playback_stop(&self);
 }
+pub type DynExtension = Arc<dyn PlaybackExtension>;
 
 pub trait PlaybackController: Send + Sync {
     fn play(&self);
@@ -135,4 +133,36 @@ pub trait PlaybackController: Send + Sync {
     fn previous(&self);
     fn stop(&self);
     fn seek(&self, position_secs: i64);
+}
+
+#[derive(Clone, Debug)]
+pub struct ConfigField {
+    pub key: String,
+    pub label: String,
+    pub is_password: bool,
+    pub default_value: String,
+}
+
+pub trait Plugin: Send + Sync {
+    fn get_config_fields(&self) -> Vec<ConfigField>;
+    fn create_provider(
+        &self,
+        config: HashMap<String, String>,
+        channel: UnboundedSender<PluginEvent>,
+    ) -> Option<Result<DynProvider, AmpError>>;
+
+    fn create_extension(
+        &self,
+        config: HashMap<String, String>,
+        channel: UnboundedSender<PluginEvent>,
+    ) -> Option<Result<DynExtension, AmpError>>;
+
+    fn id(&self) -> String;
+    fn visible_name(&self) -> String;
+}
+
+pub type DynPlugin = Arc<dyn Plugin>;
+
+pub enum PluginEvent {
+    ReloadDashboard,
 }
