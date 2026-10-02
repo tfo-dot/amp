@@ -2,6 +2,7 @@ import { Button, HorizontalBox, VerticalBox, Slider, ScrollView, LineEdit } from
 
 import { TrackSelector, TrackInfo } from "./trackselector.slint";
 import { SpeedSelector } from "./speedselector.slint";
+import { ChaptersDrawer, ChapterInfo } from  "./chapterdrawer.slint";
 
 export component RoundPlayerButton inherits Rectangle {
     in property <string> text;
@@ -42,6 +43,7 @@ export component CustomSlider inherits Rectangle {
     in-out property <float> value: 0.0;
     in property <float> minimum: 0.0;
     in property <float> maximum: 100.0;
+    in property <[ChapterInfo]> chapters: []; // Dodana lista rozdziałów
     callback changed(float);
 
     height: touch.has-hover || touch.pressed ? 8px : 4px;
@@ -54,12 +56,25 @@ export component CustomSlider inherits Rectangle {
         x: 0;
         width: parent.width * (root.value - root.minimum) / (root.maximum - root.minimum);
         height: 100%;
-        background: #00d0f0; // Beautiful cyan
+        background: #00d0f0;
         border-radius: 4px;
+    }
+
+    // Znaczniki podziału na rozdziały (nacięcia na pasku)
+    for ch in root.chapters : Rectangle {
+        // Ignorujemy znacznik na samym początku (0%)
+        visible: ch.start_percent > 0.5 && ch.start_percent < 99.5;
+        x: (parent.width * (ch.start_percent - root.minimum) / (root.maximum - root.minimum)) - 1px;
+        y: 0;
+        width: 2px;
+        height: 100%;
+        background: #000000bb; // Wycięcie w kolorze ciemnego tła
+        z: 1;
     }
 
     // Handle
     handle := Rectangle {
+        z: 2;
         x: (parent.width - self.width) * (root.value - root.minimum) / (root.maximum - root.minimum);
         y: (parent.height - self.height) / 2;
         width: 16px;
@@ -125,6 +140,12 @@ export component Player inherits Rectangle {
     in property <string> video_title: "";
     in property <string> remaining_time: "-00:00";
     in property <string> ends_at: "";
+
+    in property <[ChapterInfo]> chapters: [];
+    in property <string> current_chapter_title: "";
+    callback seek_to_chapter(ChapterInfo);
+
+    private property <bool> show_chapters_drawer: false;
 
     Image {
         source: root.video_frame;
@@ -266,14 +287,22 @@ export component Player inherits Rectangle {
                 changed(val) => { root.seek(val); }
             }
 
-            // Row 3: Current Time and Remaining Time
+            // Row 3: Current Time, Chapter Title, Remaining Time
             HorizontalLayout {
                 alignment: space-between;
-                
+
                 Text {
                     text: root.time_pos;
                     color: #aaa;
                     font-size: 12px;
+                }
+
+                if root.current_chapter_title != "" : Text {
+                    text: root.current_chapter_title;
+                    color: #ffffff;
+                    font-size: 13px;
+                    font-weight: 600;
+                    overflow: elide;
                 }
 
                 Text {
@@ -304,6 +333,16 @@ export component Player inherits Rectangle {
                         tracks: root.subtitle_tracks;
                         current_name: root.subtitle_track_name;
                         select_track(id) => { root.select_subtitle_track(id); }
+                    }
+
+                    // Nowy przycisk otwierający listę rozdziałów
+                    RoundPlayerButton {
+                        text: "📑";
+                        font-size: 15px;
+                        enabled: root.chapters.length > 0;
+                        clicked => {
+                            root.show_chapters_drawer = true
+                        }
                     }
                 }
 
@@ -376,6 +415,20 @@ export component Player inherits Rectangle {
                     }
                 }
             }
+        }
+    }
+
+    ChaptersDrawer {
+        is_open: root.show_chapters_drawer;
+        chapters: root.chapters;
+        active_chapter_title: root.current_chapter_title;
+
+        close => {
+            root.show_chapters_drawer = false;
+        }
+        select_chapter(ch) => {
+            // root.seek_to_chapter(ch);
+            root.seek(ch.start_percent); // Skok na pasku
         }
     }
 }

@@ -1,0 +1,185 @@
+import { ScrollView } from "std-widgets.slint";
+
+component RoundPlayerButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <color> bg: transparent;
+    in property <color> hover-bg: #ffffff22;
+    in property <color> active-bg: #ffffff44;
+    in property <color> icon-color: white;
+    in property <length> font-size: 16px;
+    callback clicked();
+
+    width: 40px;
+    height: 40px;
+    background: touch.pressed ? active-bg : (touch.has-hover ? hover-bg : bg);
+    border-radius: 20px;
+    border-width: 1px;
+    border-color: bg != transparent ? transparent : #ffffff25;
+    animate background { duration: 100ms; }
+
+    Text {
+        text: root.text;
+        color: root.enabled ? root.icon-color : #555;
+        font-size: root.font-size;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            if (root.enabled) {
+                root.clicked();
+            }
+        }
+    }
+}
+
+export struct ChapterInfo {
+    title: string,
+    start_percent: float,
+    time_str: string,
+}
+
+component ChapterListItem inherits Rectangle {
+    in property <ChapterInfo> chapter;
+    in property <bool> is_active: false;
+    callback clicked();
+
+    height: 48px;
+    background: touch.pressed ? #ffffff22 : (touch.has-hover ? #ffffff11 : transparent);
+    border-radius: 8px;
+    animate background { duration: 100ms; }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 12px;
+        alignment: space-between;
+
+        // Aktywny wskaźnik / Kropka lub Timestamp
+        HorizontalLayout {
+            spacing: 10px;
+            alignment: start;
+
+            // Znacznik aktywnego rozdziału
+            Rectangle {
+                width: 3px;
+                height: 24px;
+                border-radius: 1.5px;
+                background: root.is_active ? #00d0f0 : transparent;
+            }
+
+            // Czas rozpoczęcia
+            Text {
+                text: root.chapter.time_str;
+                color: root.is_active ? #00d0f0 : #888888;
+                font-size: 13px;
+                font-weight: 500;
+                vertical-alignment: center;
+            }
+
+            // Tytuł rozdziału
+            Text {
+                text: root.chapter.title;
+                color: root.is_active ? #ffffff : #cccccc;
+                font-size: 14px;
+                font-weight: root.is_active ? 700 : 500;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+export component ChaptersDrawer inherits Rectangle {
+    in property <bool> is_open: false;
+    in property <[ChapterInfo]> chapters: [];
+    in property <string> active_chapter_title: "";
+    callback close();
+    callback select_chapter(ChapterInfo);
+
+    width: 100%;
+    height: 100%;
+
+    // 1. Półprzezroczyste tło (Scrim) zamykające panel po kliknięciu poza niego
+    scrim := Rectangle {
+        width: 100%;
+        height: 100%;
+        background: #000000;
+        opacity: root.is_open ? 0.6 : 0.0;
+        animate opacity { duration: 250ms; easing: ease-out; }
+
+        TouchArea {
+            enabled: root.is_open;
+            clicked => { root.close(); }
+        }
+    }
+
+    // 2. Właściwy wysuwany panel po prawej stronie
+    drawer := Rectangle {
+        width: 340px;
+        height: 100%;
+        // Wysuwanie z prawej krawędzi (animacja pozycji X)
+        x: root.is_open ? parent.width - self.width : parent.width;
+        y: 0;
+        background: #15171c;
+        border-width: 1px;
+        border-color: #ffffff15;
+        animate x { duration: 250ms; easing: ease-out; }
+
+        // Przechwytuje kliknięcia, aby nie wywoływały akcji pod panelem (np. pauzowania filmu)
+        TouchArea {}
+
+        VerticalLayout {
+            padding: 20px;
+            spacing: 14px;
+
+            // Nagłówek Drawer-a
+            HorizontalLayout {
+                alignment: space-between;
+
+                Text {
+                    text: "Rozdziały";
+                    color: white;
+                    font-size: 18px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+
+                RoundPlayerButton {
+                    text: "✕";
+                    font-size: 15px;
+                    clicked => { root.close(); }
+                }
+            }
+
+            // Rozdzielacz nagłówka
+            Rectangle {
+                height: 1px;
+                background: #ffffff1a;
+            }
+
+            // Przewijana lista rozdziałów
+            ScrollView {
+                VerticalLayout {
+                    spacing: 4px;
+                    padding-right: 6px;
+
+                    for ch in root.chapters : ChapterListItem {
+                        chapter: ch;
+                        is_active: ch.title == root.active_chapter_title;
+                        clicked => {
+                            root.select_chapter(ch);
+                            root.close(); // Opcjonalnie zamyka panel po wyborze
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

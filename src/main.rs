@@ -21,6 +21,7 @@ use libmpv_sys::*;
 use navigation::play_episode_with_series_playlist;
 use navigation::{format_time, image_from_raw, load_dashboard, load_folder};
 use player::{GLResources, MpvHandle, MpvRenderCtx, open_player};
+use serde::Deserialize;
 use slint::{
     BorrowedOpenGLTextureBuilder, BorrowedOpenGLTextureOrigin, ComponentHandle, Model, Weak,
 };
@@ -852,6 +853,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let ui_seek = ui.as_weak();
     let mpv_seek = mpv.clone();
     ui.on_seek(move |perc| {
         let scmd = CString::new("seek").unwrap();
@@ -861,7 +863,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         unsafe {
             mpv_command(mpv_seek.get(), sargs.as_mut_ptr());
         }
+
+        if let Some(ui) = ui_seek.upgrade() {
+            unsafe {
+                update_chapters(&ui, mpv_seek.get());
+            }
+        }
     });
+
+    let ui_skip = ui.as_weak();
 
     let mpv_skip = mpv.clone();
     ui.on_skip_by(move |secs| {
@@ -870,6 +880,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut sargs = [scmd.as_ptr(), sval.as_ptr(), ptr::null()];
         unsafe {
             mpv_command(mpv_skip.get(), sargs.as_mut_ptr());
+        }
+
+        if let Some(ui) = ui_skip.upgrade() {
+            unsafe {
+                update_chapters(&ui, mpv_skip.get());
+            }
         }
     });
 
@@ -972,6 +988,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             || (*ev).event_id == mpv_event_id_MPV_EVENT_FILE_LOADED
                         {
                             update_tracks(&ui, mpv_h.get());
+                        }
+
+                        if (*ev).event_id == mpv_event_id_MPV_EVENT_FILE_LOADED {
+                            update_chapters(&ui, mpv_h.get());
                         }
                     }
 
@@ -1227,6 +1247,101 @@ unsafe fn update_tracks(ui: &AppWindow, mpv_h: *mut mpv_handle) {
             ui.set_subtitle_track_name(active_sub_name.into());
         }
         unsafe { mpv_free(tptr as *mut c_void) };
+    }
+}
+
+unsafe fn update_chapters(ui: &AppWindow, mpv_h: *mut mpv_handle) {
+    let c_chapters = CString::new("chapter-list").unwrap();
+    let c_current_chapter = CString::new("chapter").unwrap();
+
+    let cptr = unsafe { mpv_get_property_string(mpv_h, c_chapters.as_ptr()) };
+    if cptr.is_null() {
+        return;
+    }
+
+    let js = unsafe { CStr::from_ptr(cptr) }.to_string_lossy();
+
+    let mut current_idx: i64 = -1;
+    unsafe {
+        mpv_get_property(
+            mpv_h,
+            c_current_chapter.as_ptr(),
+            mpv_format_MPV_FORMAT_INT64,
+            &mut current_idx as *mut i64 as *mut c_void,
+        );
+    }
+
+    let c_dur = CString::new("duration").unwrap();
+
+    let mut dur: i64 = 0;
+
+    let got_dur = unsafe {
+        mpv_get_property(
+            mpv_h,
+            c_dur.as_ptr(),
+            mpv_format_MPV_FORMAT_INT64,
+            &mut dur as *mut _ as *mut c_void,
+        ) >= 0
+    };
+
+    if got_dur && dur > 0 {
+        ui.set_duration(format_time(dur).into());
+    }
+
+    if let Ok(chapters) = serde_json::from_str::<Vec<Chapter>>(&js) {
+        let mut chapter_items = Vec::new();
+        let mut active_name = "None".to_string();
+
+        for (idx, ch) in chapters.iter().enumerate() {
+            let is_active = idx as i64 == current_idx;
+
+            let display_title = if ch.title.is_empty() {
+                format!("Chapter {}", idx + 1)
+            } else {
+                ch.title.clone()
+            };
+
+            if is_active {
+                active_name = display_title.clone();
+            }
+
+            chapter_items.push(ChapterInfo {
+                // index: idx as i32,
+                title: display_title.into(),
+                time_str: ch.formatted_time().into(),
+                start_percent: (ch.time as f32 / dur as f32) * 100.0,
+            });
+        }
+
+        ui.set_chapters(slint::ModelRc::from(std::rc::Rc::new(
+            slint::VecModel::from(chapter_items),
+        )));
+        ui.set_current_chapter_title(active_name.into());
+    }
+
+    unsafe { mpv_free(cptr as *mut c_void) };
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct Chapter {
+    #[serde(default)]
+    title: String,
+    time: f64, // czas startu w sekundach
+}
+
+impl Chapter {
+    // Pomocnicze formatowanie sekund do "MM:SS" lub "HH:MM:SS" pod Slinta
+    fn formatted_time(&self) -> String {
+        let total_secs = self.time.round() as u64;
+        let hours = total_secs / 3600;
+        let minutes = (total_secs % 3600) / 60;
+        let seconds = total_secs % 60;
+
+        if hours > 0 {
+            format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+        } else {
+            format!("{:02}:{:02}", minutes, seconds)
+        }
     }
 }
 

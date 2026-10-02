@@ -1,5 +1,6 @@
 import { Button, HorizontalBox, VerticalBox, Slider, ScrollView, LineEdit } from "std-widgets.slint";
 import { TrackSelector, TrackInfo } from "./trackselector.slint";
+import { ChapterInfo } from "./chapterdrawer.slint";
 
 import { Player } from "./player.slint";
 
@@ -149,6 +150,10 @@ export component AppWindow inherits Window {
     in property <string> video_title: "";
     in property <string> remaining_time: "-00:00";
     in property <string> ends_at: "";
+
+    in property <[ChapterInfo]> chapters: [];
+    in property <string> current_chapter_title: "";
+    callback seek_to_chapter(ChapterInfo);
 
     // Sizes exported to Rust
     out property <length> video_width: video_area.width;
@@ -547,6 +552,10 @@ export component AppWindow inherits Window {
             select_subtitle_track(idx) => select_subtitle_track(idx);
             close_player => close_player();
             change_speed(s) => root.change_speed(s);
+
+            chapters: root.chapters;
+            current_chapter_title: root.current_chapter_title;
+            seek_to_chapter(ci) => seek_to_chapter(ci);
         }
 
     // Loading Overlay

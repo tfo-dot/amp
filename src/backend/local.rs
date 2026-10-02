@@ -1,34 +1,71 @@
-#![allow(dead_code)]
 use super::{MediaMetadata, MediaProvider as AppMediaProvider};
-use crate::api::{AmpError, ConfigField, MediaItem, MediaItemType, MediaProvider, RawImage};
+use crate::PluginEvent;
+use crate::api;
+use crate::api::DynProvider;
+use crate::api::PlaybackExtension;
+use crate::api::{
+    AmpError, ConfigField, MediaItem, MediaItemType, MediaProvider, Plugin, RawImage,
+};
 use crate::player::SessionError;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::mpsc::UnboundedSender;
+
+pub struct LocalPlugin {}
+
+impl Plugin for LocalPlugin {
+    fn get_config_fields(&self) -> Vec<ConfigField> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let videos_dir = PathBuf::from(home).join("Videos").into_string().unwrap();
+
+        vec![ConfigField {
+            key: "media_dir".to_string(),
+            label: "Dir".to_string(),
+            is_password: false,
+            default_value: videos_dir,
+        }]
+    }
+
+    fn create_provider(
+        &self,
+        config: HashMap<String, String>,
+        _: UnboundedSender<PluginEvent>,
+    ) -> Option<Result<Arc<dyn api::MediaProvider + 'static>, AmpError>> {
+        let dir = config.get("media_dir").cloned();
+
+        if let Some(dir) = dir {
+            Some(Ok(Arc::new(LocalProvider::new(dir))))
+        } else {
+            Some(Err(AmpError::Plugin("Missing media_dir".into())))
+        }
+    }
+    fn create_extension(
+        &self,
+        _: HashMap<String, String>,
+        _: UnboundedSender<PluginEvent>,
+    ) -> Option<Result<Arc<dyn PlaybackExtension + 'static>, AmpError>> {
+        None
+    }
+
+    fn id(&self) -> String {
+        "local_plugin".to_string()
+    }
+    fn visible_name(&self) -> String {
+        "local_plugin".to_string()
+    }
+}
 
 pub struct LocalProvider {
     media_dir: PathBuf,
 }
 
 impl LocalProvider {
-    pub fn new() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let videos_dir = PathBuf::from(home).join("Videos");
-        Self {
-            media_dir: videos_dir,
-        }
-    }
-
-    pub fn with_dir(dir: impl Into<PathBuf>) -> Self {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self {
             media_dir: dir.into(),
         }
-    }
-}
-
-impl Default for LocalProvider {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -219,18 +256,6 @@ impl MediaProvider for LocalProvider {
     async fn mark_as_played(&self, _item_id: &str, _played: bool) -> Result<(), AmpError> {
         Ok(())
     }
-
-    // fn get_config_fields(&self) -> Vec<ConfigField> {
-    //     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    //     let videos_dir = PathBuf::from(home).join("Videos").into_string().unwrap();
-
-    //     vec![ConfigField {
-    //         key: "media_dir".to_string(),
-    //         label: "Dir".to_string(),
-    //         is_password: false,
-    //         default_value: videos_dir,
-    //     }]
-    // }
 }
 
 fn is_video_file(path: &Path) -> bool {

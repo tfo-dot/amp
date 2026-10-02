@@ -3,6 +3,7 @@ use crate::api::DynPlugin;
 use crate::api::DynProvider;
 use crate::api::Plugin;
 use crate::api::PluginEvent;
+use crate::backend::local::LocalPlugin;
 use crate::backend::seanime::SeanimePlugin;
 use crate::discord::DiscordPlugin;
 use crate::extensions::PartsPlugin;
@@ -31,7 +32,6 @@ pub struct AppState {
     pub current_series_name: Option<String>,
     pub current_season_index: Option<i32>,
     pub current_episode_index: Option<i32>,
-    // pub active_providers: HashMap<String, DynProvider>,
     pub active_providers: PluginManager,
 }
 
@@ -90,6 +90,11 @@ impl PluginManager {
         {
             let dp = DiscordPlugin {};
             pm.register_builtin_plugin(dp.id(), Arc::new(dp));
+        }
+
+        {
+            let lp = LocalPlugin {};
+            pm.register_builtin_plugin(lp.id(), Arc::new(lp));
         }
 
         pm

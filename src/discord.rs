@@ -14,10 +14,10 @@ pub struct DiscordPlugin {}
 
 impl Plugin for DiscordPlugin {
     fn id(&self) -> String {
-        "seanime".to_string()
+        "discord".to_string()
     }
     fn visible_name(&self) -> String {
-        "Seanime".to_string()
+        "discord".to_string()
     }
 
     fn create_provider(
@@ -29,12 +29,7 @@ impl Plugin for DiscordPlugin {
     }
 
     fn get_config_fields(&self) -> Vec<ConfigField> {
-        vec![ConfigField {
-            key: "base_url".to_string(),
-            label: "Seanime server address".to_string(),
-            is_password: false,
-            default_value: "http://localhost:43211".to_string(),
-        }]
+        vec![]
     }
     fn create_extension(
         &self,
