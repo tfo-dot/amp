@@ -23,7 +23,7 @@ impl MpvHandle {
                 //Cache
                 ("vo", "libmpv"),
                 ("gpu-api", "opengl"),
-                ("hwdec", "no"),
+                ("hwdec", "auto-safe"),
                 ("cache", "yes"),
                 ("demuxer-max-bytes", "150M"),
                 ("demuxer-max-back-bytes", "75M"),

@@ -1,5 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub static NvOptimusEnablement: u32 = 0x00000000;
+
+#[cfg(target_os = "windows")]
+#[no_mangle]
+pub static AmdPowerXpressRequestHighPerformance: i32 = 0;
+
 slint::include_modules!();
 
 mod api;
@@ -198,6 +206,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mpv_render: Rc<RefCell<Option<MpvRenderCtx>>> = Rc::new(RefCell::new(None));
     let gl_resources: Rc<RefCell<Option<GLResources>>> = Rc::new(RefCell::new(None));
+    let last_screen: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let update_ctx_ptr: Rc<RefCell<Option<*mut c_void>>> = Rc::new(RefCell::new(None));
 
     {
         eprintln!("[AMP] Setting up rendering notifier...");
@@ -205,6 +215,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mpv_h = mpv.clone();
         let mpv_r = mpv_render.clone();
         let gl_res = gl_resources.clone();
+        let last_screen_r = last_screen.clone();
+        let update_ctx_r = update_ctx_ptr.clone();
 
         ui.window()
             .set_rendering_notifier(move |rendering_state, api| match rendering_state {
@@ -237,6 +249,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         if res >= 0 {
                             *mpv_r.borrow_mut() = Some(MpvRenderCtx(ctx));
+                            let cb_ctx = Box::into_raw(Box::new(ui_weak.clone())) as *mut c_void;
+                            *update_ctx_r.borrow_mut() = Some(cb_ctx);
+                            unsafe {
+                                mpv_render_context_set_update_callback(ctx, Some(on_mpv_render_update), cb_ctx);
+                            }
                             eprintln!("[AMP] MPV Render Context created successfully");
                         } else {
                             eprintln!("[AMP] Failed to create MPV Render Context: {}", res);
@@ -247,6 +264,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(render_ctx) = mpv_r.borrow().as_ref()
                         && let Some(ui) = ui_weak.upgrade()
                     {
+                        let is_player = ui.get_current_screen() == "player";
+                        if !is_player {
+                            *last_screen_r.borrow_mut() = ui.get_current_screen().to_string();
+                            return;
+                        }
+
+                        let flags = unsafe { mpv_render_context_update(render_ctx.get()) };
+                        let has_frame = (flags & (mpv_render_update_flag_MPV_RENDER_UPDATE_FRAME as u64)) != 0;
+
+                        let just_entered = *last_screen_r.borrow() != "player";
+                        *last_screen_r.borrow_mut() = "player".to_string();
+
                         let sf = ui.window().scale_factor();
                         let raw_w = (ui.get_video_width() * sf) as u32;
                         let raw_h = (ui.get_video_height() * sf) as u32;
@@ -257,9 +286,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         if width > 0 && height > 0 {
                             let mut res_lock = gl_res.borrow_mut();
-                            if res_lock
+                            let is_new = res_lock
                                 .as_ref()
-                                .is_none_or(|r| r.width != width || r.height != height)
+                                .is_none_or(|r| r.width != width || r.height != height);
+
+                            if is_new
                                 && let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = api
                             {
                                 let gl = unsafe {
@@ -268,10 +299,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         _ => std::ptr::null(),
                                     })
                                 };
-                                *res_lock = Some(GLResources::new(gl, width, height));
+                                let new_res = GLResources::new(gl, width, height);
+
+                                let image = unsafe {
+                                    BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(
+                                        std::num::NonZeroU32::new(new_res.texture.0.get()).unwrap(),
+                                        [width, height].into(),
+                                    )
+                                    .origin(BorrowedOpenGLTextureOrigin::TopLeft)
+                                    .build()
+                                };
+                                ui.set_video_frame(image);
+
+                                *res_lock = Some(new_res);
+                            } else if just_entered && let Some(res) = res_lock.as_ref() {
+                                let image = unsafe {
+                                    BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(
+                                        std::num::NonZeroU32::new(res.texture.0.get()).unwrap(),
+                                        [width, height].into(),
+                                    )
+                                    .origin(BorrowedOpenGLTextureOrigin::TopLeft)
+                                    .build()
+                                };
+                                ui.set_video_frame(image);
                             }
 
-                            if let Some(res) = res_lock.as_ref() {
+                            if (has_frame || is_new || just_entered) && let Some(res) = res_lock.as_ref() {
                                 let mut fbo = mpv_opengl_fbo {
                                     fbo: res.fbo.0.get() as i32,
                                     w: width as i32,
@@ -316,15 +369,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
 
                                     res.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
-
-                                    let image =
-                                        BorrowedOpenGLTextureBuilder::new_gl_2d_rgba_texture(
-                                            std::num::NonZeroU32::new(res.texture.0.get()).unwrap(),
-                                            [width, height].into(),
-                                        )
-                                        .origin(BorrowedOpenGLTextureOrigin::TopLeft)
-                                        .build();
-                                    ui.set_video_frame(image);
                                 }
                             }
                         }
@@ -333,7 +377,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 slint::RenderingState::RenderingTeardown => {
                     if let Some(render_ctx) = mpv_r.borrow_mut().take() {
                         unsafe {
+                            mpv_render_context_set_update_callback(render_ctx.get(), None, ptr::null_mut());
                             mpv_render_context_free(render_ctx.get());
+                        }
+                    }
+                    if let Some(ctx_ptr) = update_ctx_r.borrow_mut().take() {
+                        unsafe {
+                            drop(Box::from_raw(ctx_ptr as *mut Weak<AppWindow>));
                         }
                     }
                     *gl_res.borrow_mut() = None;
@@ -946,7 +996,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let ui_render = ui.as_weak();
-    let mpv_r = mpv_render.clone();
     let mpv_h = mpv.clone();
     let state_timer = state.clone();
     let last_report = Arc::new(Mutex::new(std::time::Instant::now()));
@@ -959,9 +1008,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let c_speed = CString::new("speed").unwrap();
 
     let render_timer = slint::Timer::default();
+    let mut last_sec: i64 = -1;
+    let mut last_dur: i64 = -1;
+    let mut last_paused: i32 = -1;
+    let mut last_speed_str = String::new();
+    let mut last_controls_visible = false;
+    let mut last_progress: f32 = -1.0;
+
     render_timer.start(
         slint::TimerMode::Repeated,
-        std::time::Duration::from_millis(16),
+        std::time::Duration::from_millis(100),
         {
             let state_arc = state_timer.clone();
             move || {
@@ -969,13 +1025,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(ui) => ui,
                     None => return,
                 };
-
-                if let Ok(last) = last_activity.lock() {
-                    let is_p = ui.get_is_paused();
-                    ui.set_controls_visible(
-                        last.elapsed() < std::time::Duration::from_secs(3) || is_p,
-                    );
-                }
 
                 unsafe {
                     loop {
@@ -995,10 +1044,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    if let Some(rctx) = mpv_r.borrow().as_ref()
-                        && (mpv_render_context_update(rctx.get()) & 1) != 0
-                    {
-                        ui.window().request_redraw();
+                    let is_in_player = ui.get_current_screen() == "player";
+                    if !is_in_player {
+                        if let Ok(mut last) = last_ext_update.lock()
+                            && last.elapsed() >= std::time::Duration::from_secs(1)
+                        {
+                            *last = std::time::Instant::now();
+                            let s = state_arc.lock().unwrap();
+
+                            for (_, ext) in s.active_providers.get_extensions() {
+                                ext.on_playback_stop();
+                            }
+                        }
+                        return;
+                    }
+
+                    if let Ok(last) = last_activity.lock() {
+                        let is_p = ui.get_is_paused();
+                        let show = last.elapsed() < std::time::Duration::from_secs(3) || is_p;
+                        if show != last_controls_visible {
+                            last_controls_visible = show;
+                            ui.set_controls_visible(show);
+                        }
                     }
 
                     let mut time: f64 = 0.0;
@@ -1013,7 +1080,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &mut perc as *mut _ as *mut c_void,
                     ) >= 0
                     {
-                        ui.set_progress(perc as f32);
+                        let p = perc as f32;
+                        if (p - last_progress).abs() > 0.05 {
+                            last_progress = p;
+                            ui.set_progress(p);
+                        }
                     }
 
                     let got_time = mpv_get_property(
@@ -1023,10 +1094,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &mut time as *mut _ as *mut c_void,
                     ) >= 0;
 
-                    if got_time {
-                        ui.set_time_pos(format_time(time as i64).into());
-                    }
-
                     let got_dur = mpv_get_property(
                         mpv_h.get(),
                         c_dur.as_ptr(),
@@ -1034,32 +1101,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &mut dur as *mut _ as *mut c_void,
                     ) >= 0;
 
-                    if got_dur && dur > 0 {
-                        ui.set_duration(format_time(dur).into());
-                    }
+                    let cur_sec = if got_time { time as i64 } else { -1 };
+                    if cur_sec != last_sec || dur != last_dur {
+                        last_sec = cur_sec;
+                        last_dur = dur;
 
-                    if got_time && got_dur {
-                        let remaining_secs = dur - time as i64;
-                        if remaining_secs >= 0 {
-                            ui.set_remaining_time(
-                                format!("-{}", format_time(remaining_secs)).into(),
-                            );
-                            let current_time = chrono::Local::now();
-                            if let Some(delta) = chrono::Duration::try_seconds(remaining_secs) {
-                                let end_time = current_time + delta;
-                                ui.set_ends_at(
-                                    format!("ends at {}", end_time.format("%-I:%M %p")).into(),
+                        if got_time {
+                            ui.set_time_pos(format_time(cur_sec).into());
+                        }
+
+                        if got_dur && dur > 0 {
+                            ui.set_duration(format_time(dur).into());
+                        }
+
+                        if got_time && got_dur {
+                            let remaining_secs = dur - cur_sec;
+                            if remaining_secs >= 0 {
+                                ui.set_remaining_time(
+                                    format!("-{}", format_time(remaining_secs)).into(),
                                 );
+                                let current_time = chrono::Local::now();
+                                if let Some(delta) = chrono::Duration::try_seconds(remaining_secs) {
+                                    let end_time = current_time + delta;
+                                    ui.set_ends_at(
+                                        format!("ends at {}", end_time.format("%-I:%M %p")).into(),
+                                    );
+                                } else {
+                                    ui.set_ends_at("".into());
+                                }
                             } else {
+                                ui.set_remaining_time("-00:00".into());
                                 ui.set_ends_at("".into());
                             }
                         } else {
                             ui.set_remaining_time("-00:00".into());
                             ui.set_ends_at("".into());
                         }
-                    } else {
-                        ui.set_remaining_time("-00:00".into());
-                        ui.set_ends_at("".into());
                     }
 
                     if mpv_get_property(
@@ -1069,7 +1146,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &mut paused as *mut _ as *mut c_void,
                     ) >= 0
                     {
-                        ui.set_is_paused(paused != 0);
+                        if paused != last_paused {
+                            last_paused = paused;
+                            ui.set_is_paused(paused != 0);
+                        }
                     }
 
                     let mut speed: f64 = 1.0;
@@ -1080,47 +1160,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &mut speed as *mut _ as *mut c_void,
                     ) >= 0
                     {
-                        ui.set_playback_speed(format!("{:.2}x", speed).into());
-                    }
-
-                    let is_in_player = ui.get_current_screen() == "player";
-                    if is_in_player {
-                        if let Ok(mut last) = last_ext_update.lock()
-                            && last.elapsed() >= std::time::Duration::from_millis(500)
-                        {
-                            *last = std::time::Instant::now();
-
-                            let s = state_arc.lock().unwrap();
-                            let info = PlaybackInfo {
-                                title: s.current_title.clone(),
-                                artist: s.current_artist.clone(),
-                                series_name: s.current_series_name.clone(),
-                                season_index: s.current_season_index,
-                                episode_index: s.current_episode_index,
-                                is_paused: paused != 0,
-                                position_secs: time as i64,
-                                duration_secs: dur,
-                            };
-
-                            for (_, ext) in s.active_providers.get_extensions() {
-                                ext.on_playback_update(info.clone());
-                            }
-                        }
-                    } else {
-                        if let Ok(mut last) = last_ext_update.lock()
-                            && last.elapsed() >= std::time::Duration::from_secs(1)
-                        {
-                            *last = std::time::Instant::now();
-                            let s = state_arc.lock().unwrap();
-
-                            for (_, ext) in s.active_providers.get_extensions() {
-                                ext.on_playback_stop();
-                            }
+                        let sp_str = format!("{:.2}x", speed);
+                        if sp_str != last_speed_str {
+                            last_speed_str = sp_str.clone();
+                            ui.set_playback_speed(sp_str.into());
                         }
                     }
 
-                    if is_in_player
-                        && got_time
+                    if let Ok(mut last) = last_ext_update.lock()
+                        && last.elapsed() >= std::time::Duration::from_millis(500)
+                    {
+                        *last = std::time::Instant::now();
+
+                        let s = state_arc.lock().unwrap();
+                        let info = PlaybackInfo {
+                            title: s.current_title.clone(),
+                            artist: s.current_artist.clone(),
+                            series_name: s.current_series_name.clone(),
+                            season_index: s.current_season_index,
+                            episode_index: s.current_episode_index,
+                            is_paused: paused != 0,
+                            position_secs: time as i64,
+                            duration_secs: dur,
+                        };
+
+                        for (_, ext) in s.active_providers.get_extensions() {
+                            ext.on_playback_update(info.clone());
+                        }
+                    }
+
+                    if got_time
                         && time > 0.0
                         && let Ok(mut last) = last_report.lock()
                         && last.elapsed() >= std::time::Duration::from_secs(1)
@@ -1395,4 +1464,19 @@ unsafe extern "C" fn get_proc_address_mpv(ctx: *mut c_void, name: *const c_char)
         let name = CStr::from_ptr(name);
         get_proc_address(name) as *mut c_void
     }
+}
+
+unsafe extern "C" fn on_mpv_render_update(ctx: *mut c_void) {
+    if ctx.is_null() {
+        return;
+    }
+    let ui_weak = unsafe { &*(ctx as *const Weak<AppWindow>) };
+    let ui_weak = ui_weak.clone();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            if ui.get_current_screen() == "player" {
+                ui.window().request_redraw();
+            }
+        }
+    });
 }
