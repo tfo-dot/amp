@@ -230,17 +230,14 @@ pub async fn open_player(
             }
         }
 
-        if let Some(pos) = resume_pos {
-            let c_start = CString::new("start").unwrap();
-            let c_pos = if pos > 0 {
-                CString::new(pos.to_string()).unwrap()
-            } else {
-                CString::new("0").unwrap()
-            };
+        let c_start = CString::new("start").unwrap();
+        let c_pos = match resume_pos {
+            Some(pos) if pos > 0 => CString::new(pos.to_string()).unwrap(),
+            _ => CString::new("none").unwrap(),
+        };
 
-            unsafe {
-                mpv_set_property_string(mpv.get(), c_start.as_ptr(), c_pos.as_ptr());
-            }
+        unsafe {
+            mpv_set_property_string(mpv.get(), c_start.as_ptr(), c_pos.as_ptr());
         }
         eprintln!("[AMP] MPV loading file: {}", final_url);
         let cmd = CString::new("loadfile").unwrap();
@@ -265,4 +262,35 @@ pub async fn open_player(
             ui.set_is_loading(false);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mpv_start_property_reset() {
+        let mpv = MpvHandle::new();
+        let c_start = CString::new("start").unwrap();
+        let c_pos = CString::new("120").unwrap();
+        let c_none = CString::new("none").unwrap();
+
+        unsafe {
+            let res1 = mpv_set_property_string(mpv.get(), c_start.as_ptr(), c_pos.as_ptr());
+            assert_eq!(res1, 0);
+
+            let val1 = mpv_get_property_string(mpv.get(), c_start.as_ptr());
+            assert!(!val1.is_null());
+            assert_eq!(CStr::from_ptr(val1).to_str().unwrap(), "120");
+            mpv_free(val1 as *mut _);
+
+            let res2 = mpv_set_property_string(mpv.get(), c_start.as_ptr(), c_none.as_ptr());
+            assert_eq!(res2, 0);
+
+            let val2 = mpv_get_property_string(mpv.get(), c_start.as_ptr());
+            assert!(!val2.is_null());
+            assert_eq!(CStr::from_ptr(val2).to_str().unwrap(), "none");
+            mpv_free(val2 as *mut _);
+        }
+    }
 }
