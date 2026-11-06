@@ -2,7 +2,7 @@
 use super::ExtensionError;
 use crate::api::{
     AmpError, ConfigField, MediaItem, MediaItemType, MediaProvider, PlaybackController,
-    PlaybackInfo, RawImage,
+    PlaybackExtension, PlaybackInfo, RawImage,
 };
 use crate::extensions::{self, ExtensionWatcher};
 use async_trait::async_trait;
@@ -549,38 +549,6 @@ pub fn init_parts_natives() {
     });
 }
 
-fn has_method(obj: &Value, method_name: &str) -> bool {
-    if let Value::Object(obj_ref) = obj {
-        let map = obj_ref.borrow();
-        let method_hash = Value::String(method_name.to_string().into()).get_hash();
-        map.contains_key(&method_hash)
-    } else {
-        false
-    }
-}
-
-fn call_parts_method(
-    obj: &Value,
-    method_name: &str,
-    args: Vec<Value>,
-    constants: &[Value],
-) -> Result<Value, String> {
-    if let Value::Object(obj_ref) = obj {
-        let map = obj_ref.borrow();
-        let method_hash = Value::String(method_name.to_string().into()).get_hash();
-        if let Some(method_val) = map.get(&method_hash) {
-            match method_val.call(args, constants.to_vec()) {
-                Ok(Some(res)) => Ok(res),
-                Ok(None) => Ok(Value::Bool(false)),
-                Err(e) => Err(format!("Error calling {}: {}", method_name, e)),
-            }
-        } else {
-            Err(format!("Method {} not found on object", method_name))
-        }
-    } else {
-        Err("Target is not an object".to_string())
-    }
-}
 
 pub enum ScriptRequest {
     // Fast path zero-allocation updates
@@ -694,8 +662,8 @@ fn spawn_script_worker(
 
         let engine = Engine::with_import_path(import_path);
 
-        let run_res = match engine.run(&source) {
-            Ok(res) => res,
+        let mut instance = match engine.instantiate(&source) {
+            Ok(inst) => inst,
             Err(e) => {
                 let _ =
                     init_tx_clone.send(Err(AmpError::Plugin(format!("Script run error: {}", e))));
@@ -703,18 +671,7 @@ fn spawn_script_worker(
             }
         };
 
-        let script_obj = match run_res.value {
-            Some(val) => val,
-            None => {
-                let _ =
-                    init_tx_clone.send(Err(AmpError::Plugin("Script returned no value".into())));
-                return;
-            }
-        };
-
-        let constants = run_res.constants;
-
-        if let Value::Object(ref_cell) = &script_obj {
+        if let Some(Value::Object(ref_cell)) = instance.exports.as_ref() {
             let obj = ref_cell.borrow();
 
             let get_val = |key: &str| {
@@ -747,10 +704,15 @@ fn spawn_script_worker(
 
         macro_rules! handle_req {
             ($method:expr, $args:expr, $resp_tx:ident, $mapper:expr, $fallback:expr) => {
-                let res = if has_method(&script_obj, $method) {
-                    call_parts_method(&script_obj, $method, $args, &constants)
-                        .map_err(AmpError::Provider)
-                        .and_then($mapper)
+                let res = if instance.has_method($method) {
+                    match instance.call_method($method, $args) {
+                        Ok(Some(val)) => $mapper(val),
+                        Ok(None) => $fallback,
+                        Err(e) => {
+                            eprintln!("[handle_req error for {}]: {}", $method, e);
+                            Err(AmpError::Provider(e))
+                        }
+                    }
                 } else {
                     $fallback
                 };
@@ -760,10 +722,10 @@ fn spawn_script_worker(
 
         macro_rules! handle_infallible {
             ($method:expr, $args:expr, $resp_tx:ident, $mapper:expr, $fallback:expr) => {
-                let res = if has_method(&script_obj, $method) {
-                    match call_parts_method(&script_obj, $method, $args, &constants) {
-                        Ok(val) => $mapper(val),
-                        Err(_) => $fallback,
+                let res = if instance.has_method($method) {
+                    match instance.call_method($method, $args) {
+                        Ok(Some(val)) => $mapper(val),
+                        _ => $fallback,
                     }
                 } else {
                     $fallback
@@ -772,63 +734,47 @@ fn spawn_script_worker(
             };
         }
 
-        while let Ok(req) = rx.recv() {
-            match req {
+        loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                Ok(req) => match req {
                 ScriptRequest::TimeUpdate(time_ms) => {
-                    if has_method(&script_obj, "on_time_update") {
-                        let _ = call_parts_method(
-                            &script_obj,
-                            "on_time_update",
-                            vec![Value::Int(time_ms)],
-                            &constants,
-                        );
+                    if instance.has_method("on_time_update") {
+                        let _ = instance.call_method("on_time_update", vec![Value::Int(time_ms)]);
                     }
                 }
                 ScriptRequest::StateChanged(state) => {
-                    if has_method(&script_obj, "on_state_changed") {
-                        let _ = call_parts_method(
-                            &script_obj,
-                            "on_state_changed",
-                            vec![Value::Int(state)],
-                            &constants,
-                        );
+                    if instance.has_method("on_state_changed") {
+                        let _ = instance.call_method("on_state_changed", vec![Value::Int(state)]);
                     }
-                    if state == 1 && has_method(&script_obj, "on_play") {
-                        let _ = call_parts_method(&script_obj, "on_play", vec![], &constants);
-                    } else if state == 0 && has_method(&script_obj, "on_pause") {
-                        let _ = call_parts_method(&script_obj, "on_pause", vec![], &constants);
-                    } else if state == 3 && has_method(&script_obj, "on_stop") {
-                        let _ = call_parts_method(&script_obj, "on_stop", vec![], &constants);
+                    if state == 1 && instance.has_method("on_play") {
+                        let _ = instance.call_method("on_play", vec![]);
+                    } else if state == 0 && instance.has_method("on_pause") {
+                        let _ = instance.call_method("on_pause", vec![]);
+                    } else if state == 3 && instance.has_method("on_stop") {
+                        let _ = instance.call_method("on_stop", vec![]);
                     }
                 }
                 ScriptRequest::VmCommand { cmd, arg, resp_tx } => {
-                    let res = if has_method(&script_obj, "on_vm_command") {
-                        call_parts_method(
-                            &script_obj,
-                            "on_vm_command",
-                            vec![Value::Int(cmd), Value::Int(arg)],
-                            &constants,
-                        )
-                        .map(|_| ())
+                    let res = if instance.has_method("on_vm_command") {
+                        instance
+                            .call_method("on_vm_command", vec![Value::Int(cmd), Value::Int(arg)])
+                            .map(|_| ())
                     } else {
                         Ok(())
                     };
                     let _ = resp_tx.send(res);
                 }
                 ScriptRequest::OnPlaybackUpdate(info) => {
-                    if has_method(&script_obj, "on_playback_update") {
-                        let _ = call_parts_method(
-                            &script_obj,
+                    if instance.has_method("on_playback_update") {
+                        let _ = instance.call_method(
                             "on_playback_update",
                             vec![playback_info_to_parts(info)],
-                            &constants,
                         );
                     }
                 }
                 ScriptRequest::OnPlaybackStop => {
-                    if has_method(&script_obj, "on_playback_stop") {
-                        let _ =
-                            call_parts_method(&script_obj, "on_playback_stop", vec![], &constants);
+                    if instance.has_method("on_playback_stop") {
+                        let _ = instance.call_method("on_playback_stop", vec![]);
                     }
                 }
                 ScriptRequest::GetRoot { resp_tx } => {
@@ -882,15 +828,14 @@ fn spawn_script_worker(
                     );
                 }
                 ScriptRequest::GetItemImageBuffer { item_id, resp_tx } => {
-                    let res = if has_method(&script_obj, "get_item_image_buffer") {
-                        call_parts_method(
-                            &script_obj,
-                            "get_item_image_buffer",
-                            vec![Value::String(item_id.into())],
-                            &constants,
-                        )
-                        .map_err(AmpError::Provider)
-                        .and_then(|val| parts_to_raw_image(&val))
+                    let res = if instance.has_method("get_item_image_buffer") {
+                        instance
+                            .call_method(
+                                "get_item_image_buffer",
+                                vec![Value::String(item_id.into())],
+                            )
+                            .map_err(AmpError::Provider)
+                            .and_then(|val| parts_to_raw_image(&val.unwrap_or(Value::Bool(false))))
                     } else {
                         Err(AmpError::Provider("Not supported".into()))
                     };
@@ -964,8 +909,15 @@ fn spawn_script_worker(
                         Ok(())
                     );
                 }
+            },
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if instance.has_method("on_tick") {
+                    let _ = instance.call_method("on_tick", vec![]);
+                }
             }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
+    }
     });
 
     tx
@@ -987,16 +939,31 @@ pub fn get_parts_dir() -> Option<PathBuf> {
 
 pub fn discover_parts_scripts() -> Vec<(String, PathBuf)> {
     let mut scripts = Vec::new();
-    if let Some(dir) = get_parts_dir()
-        && let Ok(entries) = std::fs::read_dir(dir)
-    {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file()
-                && path.extension().and_then(|s| s.to_str()) == Some("pts")
-                && let Some(name) = path.file_stem().and_then(|s| s.to_str())
-            {
-                scripts.push((name.to_string(), path));
+    let mut search_dirs = Vec::new();
+    if let Some(dir) = get_parts_dir() {
+        search_dirs.push(dir);
+    }
+    let local_plugins = PathBuf::from("plugins/parts");
+    if local_plugins.is_dir() {
+        search_dirs.push(local_plugins);
+    }
+    let local_plugins_root = PathBuf::from("plugins");
+    if local_plugins_root.is_dir() {
+        search_dirs.push(local_plugins_root);
+    }
+
+    let mut seen_names = std::collections::HashSet::new();
+    for dir in search_dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file()
+                    && path.extension().and_then(|s| s.to_str()) == Some("pts")
+                    && let Some(name) = path.file_stem().and_then(|s| s.to_str())
+                    && seen_names.insert(name.to_string())
+                {
+                    scripts.push((name.to_string(), path));
+                }
             }
         }
     }
@@ -1149,6 +1116,16 @@ impl ExtensionBridge for PartsExtensionBridge {
             name, script_path
         );
         self.load_single_script(&name, path)
+    }
+}
+
+impl PlaybackExtension for PartsExtensionBridge {
+    fn on_playback_update(&self, info: PlaybackInfo) {
+        self.notify_playback_update(info);
+    }
+
+    fn on_playback_stop(&self) {
+        self.notify_playback_stop();
     }
 }
 
@@ -1481,10 +1458,15 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicI64, Ordering};
 
+    #[derive(Default)]
     struct DummyController {
         played: AtomicI64,
         paused: AtomicI64,
+        toggle_paused: AtomicI64,
         seek_val: AtomicI64,
+        next_count: AtomicI64,
+        prev_count: AtomicI64,
+        stop_count: AtomicI64,
     }
 
     impl PlaybackController for DummyController {
@@ -1494,10 +1476,18 @@ mod tests {
         fn pause(&self) {
             self.paused.fetch_add(1, Ordering::SeqCst);
         }
-        fn toggle_pause(&self) {}
-        fn next(&self) {}
-        fn previous(&self) {}
-        fn stop(&self) {}
+        fn toggle_pause(&self) {
+            self.toggle_paused.fetch_add(1, Ordering::SeqCst);
+        }
+        fn next(&self) {
+            self.next_count.fetch_add(1, Ordering::SeqCst);
+        }
+        fn previous(&self) {
+            self.prev_count.fetch_add(1, Ordering::SeqCst);
+        }
+        fn stop(&self) {
+            self.stop_count.fetch_add(1, Ordering::SeqCst);
+        }
         fn seek(&self, position_secs: i64) {
             self.seek_val.store(position_secs, Ordering::SeqCst);
         }
@@ -1611,5 +1601,87 @@ mod tests {
         assert_eq!(reloaded_time, Value::Int(200));
 
         let _ = std::fs::remove_file(script_file);
+    }
+
+    #[test]
+    fn test_mpris_plugin_integration() {
+        let script_path = PathBuf::from("plugins/parts/mpris.pts");
+        if !script_path.exists() {
+            return;
+        }
+
+        let ctrl = Arc::new(DummyController::default());
+        set_global_controller(ctrl.clone());
+
+        let bridge = PartsExtensionBridge::new();
+        let load_res = bridge.load_single_script("mpris", script_path);
+        assert!(load_res.is_ok(), "Failed to load mpris.pts: {:?}", load_res.err());
+
+        // Give the script a moment to register with D-Bus
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        // 1. Initial status should be "Stopped"
+        let status_out = std::process::Command::new("playerctl")
+            .args(["-p", "amp", "status"])
+            .output();
+        if let Ok(out) = status_out {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            assert_eq!(s, "Stopped");
+        }
+
+        // 2. Playback update: Playing
+        bridge.notify_playback_update(PlaybackInfo {
+            title: "Steins;Gate".into(),
+            artist: "White Fox".into(),
+            series_name: Some("Anime".into()),
+            season_index: Some(1),
+            episode_index: Some(1),
+            is_paused: false,
+            position_secs: 42,
+            duration_secs: 1440,
+        });
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        if let Ok(out) = std::process::Command::new("playerctl")
+            .args(["-p", "amp", "status"])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            assert_eq!(s, "Playing");
+        }
+
+        if let Ok(out) = std::process::Command::new("playerctl")
+            .args(["-p", "amp", "metadata", "title"])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            assert_eq!(s, "Steins;Gate");
+        }
+
+        // 3. Command: play-pause
+        let _ = std::process::Command::new("playerctl")
+            .args(["-p", "amp", "play-pause"])
+            .output();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(ctrl.toggle_paused.load(Ordering::SeqCst) > 0);
+
+        // 4. Command: seek
+        let _ = std::process::Command::new("playerctl")
+            .args(["-p", "amp", "position", "100"])
+            .output();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert_eq!(ctrl.seek_val.load(Ordering::SeqCst), 100);
+
+        // 5. Playback stop
+        bridge.notify_playback_stop();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+
+        if let Ok(out) = std::process::Command::new("playerctl")
+            .args(["-p", "amp", "status"])
+            .output()
+        {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            assert_eq!(s, "Stopped");
+        }
     }
 }

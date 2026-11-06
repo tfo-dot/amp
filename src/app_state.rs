@@ -83,7 +83,7 @@ impl PluginManager {
         }
 
         {
-            let pp = PartsPlugin {};
+            let pp = PartsPlugin::new();
             pm.register_builtin_plugin(pp.id(), Arc::new(pp));
         }
 

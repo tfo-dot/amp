@@ -34,7 +34,7 @@ Every Parts script must evaluate to and return an object (`|> ... <|`) containin
 return |>
     // Playback Extension Hooks
     on_playback_update: fun(info) {
-        log("Playing: " + to_string(info.title));
+        log("Playing: ".join(to_string(info.title)));
     },
     on_playback_stop: fun() {
         log("Playback stopped");
@@ -133,6 +133,7 @@ Implement these callback functions to react to playback events and player status
 | `on_pause` | None | Triggered when playback transitions to paused. |
 | `on_stop` | None | Triggered when playback transitions to stopped. |
 | `on_vm_command` | `cmd, arg` | Called when a custom VM command is dispatched. |
+| `on_tick` | None | Periodic idle tick (~50ms) for background polling (e.g. D-Bus/MPRIS event loops). |
 
 ### `PlaybackInfo` Object Format
 
@@ -224,13 +225,13 @@ let WEBHOOK_URL = "https://example.com/api/scrobble";
 return |>
     on_playback_update: fun(info) {
         if (!info.is_paused) {
-            let payload = "{\"title\":\"" + to_string(info.title) + "\",\"position\":" + to_string(info.position_secs) + "}";
+            let payload = "{\"title\":\"".join(to_string(info.title)).join("\",\"position\":").join(to_string(info.position_secs)).join("}");
             let headers = |>
                 0: |> key: "Content-Type", value: "application/json" <|,
                 len: 1
             <|;
             http_request("POST", WEBHOOK_URL, headers, payload);
-            log("Scrobbled progress for: " + to_string(info.title));
+            log("Scrobbled progress for: ".join(to_string(info.title)));
         }
     },
 
@@ -292,11 +293,11 @@ return |>
         if (item_id == "stream_101") {
             return "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
         }
-        return "https://example.com/video/" + item_id + ".mp4";
+        return "https://example.com/video/".join(item_id).join(".mp4");
     },
 
     get_resume_position: fun(item_id) {
-        let last_pos = get_state("resume_" + item_id);
+        let last_pos = get_state("resume_".join(item_id));
         if (last_pos) {
             return last_pos;
         }
@@ -304,7 +305,11 @@ return |>
     },
 
     report_playback_progress: fun(item_id, position_secs, is_paused) {
-        set_state("resume_" + item_id, position_secs);
+        set_state("resume_".join(item_id), position_secs);
     }
 <|;
+
+### 3. MPRIS Media Player Remote Interfacing (`mpris.pts`)
+
+A full D-Bus MPRIS v2 player extension is provided in `plugins/parts/mpris.pts`. It registers `org.mpris.MediaPlayer2.amp` on the user session bus, advertises player metadata and playback status to desktop environments (GNOME, KDE, Waybar, lockscreens), emits `PropertiesChanged` D-Bus signals, and translates MPRIS commands (`Play`, `Pause`, `PlayPause`, `Stop`, `Next`, `Previous`, `Seek`, `SetPosition`) into AMP native player control calls.
 ```

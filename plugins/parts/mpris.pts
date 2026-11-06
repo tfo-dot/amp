@@ -1,0 +1,1100 @@
+let std = import `@std/std.pts`;
+
+"--- Wire Serialization Helpers ---"
+
+let pad_bytes = fun(buf, alignment) {
+    let blen = __bytes_len(buf);
+    let rem = blen % alignment;
+    if rem > 0 {
+        let pad_count = alignment - rem;
+        let p = 0;
+        for p < pad_count {
+            __bytes_push(buf, 0);
+            p = p + 1;
+        }
+    }
+    return 1;
+};
+
+let append_u32_le = fun(buf, val) {
+    let b0 = val & 255;
+    let b1 = (val >> 8) & 255;
+    let b2 = (val >> 16) & 255;
+    let b3 = (val >> 24) & 255;
+    __bytes_push(buf, b0);
+    __bytes_push(buf, b1);
+    __bytes_push(buf, b2);
+    __bytes_push(buf, b3);
+    return 1;
+};
+
+let append_u64_le = fun(buf, val) {
+    let low = val & 4294967295;
+    let high = (val >> 32) & 4294967295;
+    append_u32_le(buf, low);
+    append_u32_le(buf, high);
+    return 1;
+};
+
+let append_double_1 = fun(buf) {
+    "1.0 in IEEE 754 double (little-endian: 0x3FF0000000000000)"
+    __bytes_push(buf, 0);
+    __bytes_push(buf, 0);
+    __bytes_push(buf, 0);
+    __bytes_push(buf, 0);
+    __bytes_push(buf, 0);
+    __bytes_push(buf, 0);
+    __bytes_push(buf, 240);
+    __bytes_push(buf, 63);
+    return 1;
+};
+
+let append_str_val = fun(buf, text) {
+    let str_bytes = __bytes_from_string(text);
+    let s_len = __bytes_len(str_bytes);
+    append_u32_le(buf, s_len);
+    __bytes_extend(buf, str_bytes);
+    __bytes_push(buf, 0);
+    return 1;
+};
+
+let append_header_field_str = fun(fields, code, sig_type, text) {
+    pad_bytes(fields, 8);
+    __bytes_push(fields, code);
+    __bytes_push(fields, 1);
+    let sig_bytes = __bytes_from_string(sig_type);
+    __bytes_extend(fields, sig_bytes);
+    __bytes_push(fields, 0);
+    pad_bytes(fields, 4);
+    append_str_val(fields, text);
+    return 1;
+};
+
+let append_header_field_u32 = fun(fields, code, val) {
+    pad_bytes(fields, 8);
+    __bytes_push(fields, code);
+    __bytes_push(fields, 1);
+    let sig_bytes = __bytes_from_string("u");
+    __bytes_extend(fields, sig_bytes);
+    __bytes_push(fields, 0);
+    pad_bytes(fields, 4);
+    append_u32_le(fields, val);
+    return 1;
+};
+
+let append_header_field_sig = fun(fields, code, body_sig) {
+    pad_bytes(fields, 8);
+    __bytes_push(fields, code);
+    __bytes_push(fields, 1);
+    let g_byte = __bytes_from_string("g");
+    __bytes_extend(fields, g_byte);
+    __bytes_push(fields, 0);
+    let sig_bytes = __bytes_from_string(body_sig);
+    __bytes_push(fields, __bytes_len(sig_bytes));
+    __bytes_extend(fields, sig_bytes);
+    __bytes_push(fields, 0);
+    return 1;
+};
+
+let make_method_call = fun(serial, dest, path, iface, member, body_bytes, body_sig) {
+    let fields = __bytes_new(0).unwrap();
+    append_header_field_str(fields, 1, "o", path);
+
+    if (iface == "") == false {
+        append_header_field_str(fields, 2, "s", iface);
+    }
+    append_header_field_str(fields, 3, "s", member);
+
+    if (dest == "") == false {
+        append_header_field_str(fields, 6, "s", dest);
+    }
+
+    if (body_sig == "") == false {
+        append_header_field_sig(fields, 8, body_sig);
+    }
+
+    let b_len = 0;
+    if (body_bytes == 0) == false {
+        b_len = __bytes_len(body_bytes);
+    }
+
+    let hdr = __bytes_new(0).unwrap();
+    __bytes_push(hdr, 108); "l = Little Endian"
+    __bytes_push(hdr, 1);   "1 = METHOD_CALL"
+    __bytes_push(hdr, 0);   "flags"
+    __bytes_push(hdr, 1);   "proto version"
+    append_u32_le(hdr, b_len);
+    append_u32_le(hdr, serial);
+    append_u32_le(hdr, __bytes_len(fields));
+    __bytes_extend(hdr, fields);
+    pad_bytes(hdr, 8);
+
+    if (body_bytes == 0) == false {
+        __bytes_extend(hdr, body_bytes);
+    }
+    return hdr;
+};
+
+let make_method_return = fun(serial, reply_serial, dest, body_bytes, body_sig) {
+    let fields = __bytes_new(0).unwrap();
+    append_header_field_u32(fields, 5, reply_serial);
+
+    if (dest == "") == false {
+        append_header_field_str(fields, 6, "s", dest);
+    }
+
+    if (body_sig == "") == false {
+        append_header_field_sig(fields, 8, body_sig);
+    }
+
+    let b_len = 0;
+    if (body_bytes == 0) == false {
+        b_len = __bytes_len(body_bytes);
+    }
+
+    let hdr = __bytes_new(0).unwrap();
+    __bytes_push(hdr, 108);
+    __bytes_push(hdr, 2);   "2 = METHOD_RETURN"
+    __bytes_push(hdr, 1);   "1 = NO_REPLY_EXPECTED"
+    __bytes_push(hdr, 1);
+    append_u32_le(hdr, b_len);
+    append_u32_le(hdr, serial);
+    append_u32_le(hdr, __bytes_len(fields));
+    __bytes_extend(hdr, fields);
+    pad_bytes(hdr, 8);
+
+    if (body_bytes == 0) == false {
+        __bytes_extend(hdr, body_bytes);
+    }
+    return hdr;
+};
+
+let make_signal = fun(serial, path, iface, member, body_bytes, body_sig) {
+    let fields = __bytes_new(0).unwrap();
+    append_header_field_str(fields, 1, "o", path);
+    append_header_field_str(fields, 2, "s", iface);
+    append_header_field_str(fields, 3, "s", member);
+
+    if (body_sig == "") == false {
+        append_header_field_sig(fields, 8, body_sig);
+    }
+
+    let b_len = 0;
+    if (body_bytes == 0) == false {
+        b_len = __bytes_len(body_bytes);
+    }
+
+    let hdr = __bytes_new(0).unwrap();
+    __bytes_push(hdr, 108);
+    __bytes_push(hdr, 4);   "4 = SIGNAL"
+    __bytes_push(hdr, 1);   "1 = NO_REPLY_EXPECTED"
+    __bytes_push(hdr, 1);
+    append_u32_le(hdr, b_len);
+    append_u32_le(hdr, serial);
+    append_u32_le(hdr, __bytes_len(fields));
+    __bytes_extend(hdr, fields);
+    pad_bytes(hdr, 8);
+
+    if (body_bytes == 0) == false {
+        __bytes_extend(hdr, body_bytes);
+    }
+    return hdr;
+};
+
+let align_offset = fun(offset, alignment) {
+    let rem = offset % alignment;
+    if rem > 0 {
+        return offset + (alignment - rem);
+    }
+    return offset;
+};
+
+let bytes_to_str = fun(b) {
+    let res = __bytes_to_string(b);
+    if res.is_ok() {
+        return res.unwrap();
+    }
+    return to_string(b);
+};
+
+let parse_string_at = fun(buf, offset) {
+    let s_len = buf.get_u32_le(offset).unwrap();
+    let str_bytes = buf.slice(offset + 4, offset + 4 + s_len).unwrap();
+    let str_val = bytes_to_str(str_bytes);
+    return |>
+        val: str_val,
+        next_offset: offset + 4 + s_len + 1
+    <|;
+};
+
+let extract_body = fun(msg) {
+    let fields_len = msg.get_u32_le(12).unwrap();
+    let total_hdr = 16 + fields_len;
+    let pad_len = (8 - (total_hdr % 8)) % 8;
+    let hdr_size = total_hdr + pad_len;
+    let total_len = __bytes_len(msg);
+    if total_len <= hdr_size {
+        return __bytes_new(0).unwrap();
+    }
+    return msg.slice(hdr_size, total_len).unwrap();
+};
+
+let parse_headers = fun(msg) {
+    let fields_len = msg.get_u32_le(12).unwrap();
+    let offset = 16;
+    let end_offset = 16 + fields_len;
+
+    let path = "";
+    let iface = "";
+    let member = "";
+    let sender = "";
+    let signature = "";
+    let reply_serial = 0;
+
+    for offset < end_offset {
+        offset = align_offset(offset, 8);
+        if offset >= end_offset {
+            break;
+        }
+
+        let code = msg[offset];
+        offset = offset + 1;
+        let sig_len = msg[offset];
+        offset = offset + 1 + sig_len + 1;
+
+        if code == 1 {
+            offset = align_offset(offset, 4);
+            let p = parse_string_at(msg, offset);
+            path = p.val;
+            offset = p.next_offset;
+        } else {
+            if code == 2 {
+                offset = align_offset(offset, 4);
+                let p = parse_string_at(msg, offset);
+                iface = p.val;
+                offset = p.next_offset;
+            } else {
+                if code == 3 {
+                    offset = align_offset(offset, 4);
+                    let p = parse_string_at(msg, offset);
+                    member = p.val;
+                    offset = p.next_offset;
+                } else {
+                    if code == 5 {
+                        offset = align_offset(offset, 4);
+                        reply_serial = msg.get_u32_le(offset).unwrap();
+                        offset = offset + 4;
+                    } else {
+                        if code == 6 {
+                            offset = align_offset(offset, 4);
+                            let p = parse_string_at(msg, offset);
+                            offset = p.next_offset;
+                        } else {
+                            if code == 7 {
+                                offset = align_offset(offset, 4);
+                                let p = parse_string_at(msg, offset);
+                                sender = p.val;
+                                offset = p.next_offset;
+                            } else {
+                                if code == 8 {
+                                    let s_len = msg[offset];
+                                    let s_bytes = msg.slice(offset + 1, offset + 1 + s_len).unwrap();
+                                    signature = bytes_to_str(s_bytes);
+                                    offset = offset + 1 + s_len + 1;
+                                } else {
+                                    offset = offset + 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return |>
+        path: path,
+        iface: iface,
+        member: member,
+        sender: sender,
+        signature: signature,
+        reply_serial: reply_serial
+    <|;
+};
+
+"--- D-Bus Dict & Property Builders ---"
+
+let append_dict_entry_str = fun(buf, key, val) {
+    pad_bytes(buf, 8);
+    append_str_val(buf, key);
+    __bytes_push(buf, 1);
+    __bytes_extend(buf, __bytes_from_string("s"));
+    __bytes_push(buf, 0);
+    pad_bytes(buf, 4);
+    append_str_val(buf, val);
+    return 1;
+};
+
+let append_dict_entry_bool = fun(buf, key, val) {
+    pad_bytes(buf, 8);
+    append_str_val(buf, key);
+    __bytes_push(buf, 1);
+    __bytes_extend(buf, __bytes_from_string("b"));
+    __bytes_push(buf, 0);
+    pad_bytes(buf, 4);
+    let b_int = 0;
+    if val { b_int = 1; }
+    append_u32_le(buf, b_int);
+    return 1;
+};
+
+let append_dict_entry_int64 = fun(buf, key, val) {
+    pad_bytes(buf, 8);
+    append_str_val(buf, key);
+    __bytes_push(buf, 1);
+    __bytes_extend(buf, __bytes_from_string("x"));
+    __bytes_push(buf, 0);
+    pad_bytes(buf, 8);
+    append_u64_le(buf, val);
+    return 1;
+};
+
+let append_dict_entry_double = fun(buf, key) {
+    pad_bytes(buf, 8);
+    append_str_val(buf, key);
+    __bytes_push(buf, 1);
+    __bytes_extend(buf, __bytes_from_string("d"));
+    __bytes_push(buf, 0);
+    pad_bytes(buf, 8);
+    append_double_1(buf);
+    return 1;
+};
+
+let append_dict_entry_empty_as = fun(buf, key) {
+    pad_bytes(buf, 8);
+    append_str_val(buf, key);
+    __bytes_push(buf, 2);
+    __bytes_extend(buf, __bytes_from_string("as"));
+    __bytes_push(buf, 0);
+    pad_bytes(buf, 4);
+    append_u32_le(buf, 0);
+    return 1;
+};
+
+let build_metadata_dict = fun(title, artist, album, duration_us) {
+    let entries = __bytes_new(0).unwrap();
+
+    pad_bytes(entries, 8);
+    append_str_val(entries, "mpris:trackid");
+    __bytes_push(entries, 1);
+    __bytes_extend(entries, __bytes_from_string("o"));
+    __bytes_push(entries, 0);
+    pad_bytes(entries, 4);
+    append_str_val(entries, "/org/amp/track/0");
+
+    pad_bytes(entries, 8);
+    append_str_val(entries, "mpris:length");
+    __bytes_push(entries, 1);
+    __bytes_extend(entries, __bytes_from_string("x"));
+    __bytes_push(entries, 0);
+    pad_bytes(entries, 8);
+    append_u64_le(entries, duration_us);
+
+    pad_bytes(entries, 8);
+    append_str_val(entries, "xesam:title");
+    __bytes_push(entries, 1);
+    __bytes_extend(entries, __bytes_from_string("s"));
+    __bytes_push(entries, 0);
+    pad_bytes(entries, 4);
+    append_str_val(entries, title);
+
+    if (artist == "") == false {
+        pad_bytes(entries, 8);
+        append_str_val(entries, "xesam:artist");
+        __bytes_push(entries, 2);
+        __bytes_extend(entries, __bytes_from_string("as"));
+        __bytes_push(entries, 0);
+        pad_bytes(entries, 4);
+        let art_bytes = __bytes_new(0).unwrap();
+        append_str_val(art_bytes, artist);
+        append_u32_le(entries, __bytes_len(art_bytes));
+        __bytes_extend(entries, art_bytes);
+    }
+
+    if (album == "") == false {
+        pad_bytes(entries, 8);
+        append_str_val(entries, "xesam:album");
+        __bytes_push(entries, 1);
+        __bytes_extend(entries, __bytes_from_string("s"));
+        __bytes_push(entries, 0);
+        pad_bytes(entries, 4);
+        append_str_val(entries, album);
+    }
+
+    return entries;
+};
+
+let build_player_properties = fun(playback_status, title, artist, album, duration_us, position_us) {
+    let entries = __bytes_new(0).unwrap();
+
+    append_dict_entry_str(entries, "PlaybackStatus", playback_status);
+    append_dict_entry_str(entries, "LoopStatus", "None");
+    append_dict_entry_double(entries, "Rate");
+    append_dict_entry_bool(entries, "Shuffle", false);
+
+    let meta_dict = build_metadata_dict(title, artist, album, duration_us);
+    pad_bytes(entries, 8);
+    append_str_val(entries, "Metadata");
+    __bytes_push(entries, 5);
+    __bytes_extend(entries, __bytes_from_string("a{sv}"));
+    __bytes_push(entries, 0);
+    pad_bytes(entries, 4);
+    append_u32_le(entries, __bytes_len(meta_dict));
+    pad_bytes(entries, 8);
+    __bytes_extend(entries, meta_dict);
+
+    append_dict_entry_double(entries, "Volume");
+    append_dict_entry_int64(entries, "Position", position_us);
+    append_dict_entry_double(entries, "MinimumRate");
+    append_dict_entry_double(entries, "MaximumRate");
+    append_dict_entry_bool(entries, "CanGoNext", true);
+    append_dict_entry_bool(entries, "CanGoPrevious", true);
+    append_dict_entry_bool(entries, "CanPlay", true);
+    append_dict_entry_bool(entries, "CanPause", true);
+    append_dict_entry_bool(entries, "CanSeek", true);
+    append_dict_entry_bool(entries, "CanControl", true);
+
+    let res = __bytes_new(0).unwrap();
+    append_u32_le(res, __bytes_len(entries));
+    pad_bytes(res, 8);
+    __bytes_extend(res, entries);
+    return res;
+};
+
+let build_mediaplayer2_properties = fun() {
+    let entries = __bytes_new(0).unwrap();
+    append_dict_entry_bool(entries, "CanQuit", true);
+    append_dict_entry_bool(entries, "CanRaise", false);
+    append_dict_entry_bool(entries, "HasTrackList", false);
+    append_dict_entry_str(entries, "Identity", "amp");
+    append_dict_entry_empty_as(entries, "SupportedUriSchemes");
+    append_dict_entry_empty_as(entries, "SupportedMimeTypes");
+
+    let res = __bytes_new(0).unwrap();
+    append_u32_le(res, __bytes_len(entries));
+    pad_bytes(res, 8);
+    __bytes_extend(res, entries);
+    return res;
+};
+
+let build_introspection_xml = fun() {
+    return `<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <interface name="org.freedesktop.DBus.Introspectable">
+    <method name="Introspect">
+      <arg name="xml_data" type="s" direction="out"/>
+    </method>
+  </interface>
+  <interface name="org.freedesktop.DBus.Properties">
+    <method name="Get">
+      <arg name="interface_name" type="s" direction="in"/>
+      <arg name="property_name" type="s" direction="in"/>
+      <arg name="value" type="v" direction="out"/>
+    </method>
+    <method name="GetAll">
+      <arg name="interface_name" type="s" direction="in"/>
+      <arg name="properties" type="a{sv}" direction="out"/>
+    </method>
+    <method name="Set">
+      <arg name="interface_name" type="s" direction="in"/>
+      <arg name="property_name" type="s" direction="in"/>
+      <arg name="value" type="v" direction="in"/>
+    </method>
+    <signal name="PropertiesChanged">
+      <arg name="interface_name" type="s"/>
+      <arg name="changed_properties" type="a{sv}"/>
+      <arg name="invalidated_properties" type="as"/>
+    </signal>
+  </interface>
+  <interface name="org.mpris.MediaPlayer2">
+    <method name="Raise"/>
+    <method name="Quit"/>
+    <property name="CanQuit" type="b" access="read"/>
+    <property name="CanRaise" type="b" access="read"/>
+    <property name="HasTrackList" type="b" access="read"/>
+    <property name="Identity" type="s" access="read"/>
+    <property name="SupportedUriSchemes" type="as" access="read"/>
+    <property name="SupportedMimeTypes" type="as" access="read"/>
+  </interface>
+  <interface name="org.mpris.MediaPlayer2.Player">
+    <method name="Next"/>
+    <method name="Previous"/>
+    <method name="Pause"/>
+    <method name="PlayPause"/>
+    <method name="Stop"/>
+    <method name="Play"/>
+    <method name="Seek">
+      <arg name="Offset" type="x" direction="in"/>
+    </method>
+    <method name="SetPosition">
+      <arg name="TrackId" type="o" direction="in"/>
+      <arg name="Position" type="x" direction="in"/>
+    </method>
+    <method name="OpenUri">
+      <arg name="Uri" type="s" direction="in"/>
+    </method>
+    <signal name="Seeked">
+      <arg name="Position" type="x"/>
+    </signal>
+    <property name="PlaybackStatus" type="s" access="read"/>
+    <property name="LoopStatus" type="s" access="readwrite"/>
+    <property name="Rate" type="d" access="readwrite"/>
+    <property name="Shuffle" type="b" access="readwrite"/>
+    <property name="Metadata" type="a{sv}" access="read"/>
+    <property name="Volume" type="d" access="readwrite"/>
+    <property name="Position" type="x" access="read"/>
+    <property name="MinimumRate" type="d" access="read"/>
+    <property name="MaximumRate" type="d" access="read"/>
+    <property name="CanGoNext" type="b" access="read"/>
+    <property name="CanGoPrevious" type="b" access="read"/>
+    <property name="CanPlay" type="b" access="read"/>
+    <property name="CanPause" type="b" access="read"/>
+    <property name="CanSeek" type="b" access="read"/>
+    <property name="CanControl" type="b" access="read"/>
+  </interface>
+</node>`;
+};
+
+"--- D-Bus Socket Connection & Setup ---"
+
+let to_hex_ascii = fun(str) {
+    let s_bytes = __bytes_from_string(str);
+    let hex_buf = __bytes_new(0).unwrap();
+    let i = 0;
+    let l = __bytes_len(s_bytes);
+    for i < l {
+        let b = s_bytes[i];
+        let h1 = (b >> 4) & 15;
+        let h2 = b & 15;
+        let c1 = 48 + h1;
+        if h1 > 9 { c1 = 87 + h1; }
+        let c2 = 48 + h2;
+        if h2 > 9 { c2 = 87 + h2; }
+        __bytes_push(hex_buf, c1);
+        __bytes_push(hex_buf, c2);
+        i = i + 1;
+    }
+    return bytes_to_str(hex_buf);
+};
+
+let get_dbus_socket_and_uid = fun() {
+    let bus_path = "/run/user/1000/bus";
+    let uid_str = "1000";
+
+    let env_xdg = std.sys.env("XDG_RUNTIME_DIR").unwrap_or("");
+    if (env_xdg == "") == false {
+        bus_path = env_xdg.join("/bus");
+    }
+
+    let env_bus = std.sys.env("DBUS_SESSION_BUS_ADDRESS").unwrap_or("");
+    if (env_bus == "") == false {
+        let p_bytes = __bytes_from_string(env_bus);
+        let prefix = "unix:path=";
+        let pref_bytes = __bytes_from_string(prefix);
+        if __bytes_len(p_bytes) > __bytes_len(pref_bytes) {
+            let slice_res = p_bytes.slice(__bytes_len(pref_bytes), __bytes_len(p_bytes));
+            if slice_res.is_ok() {
+                bus_path = bytes_to_str(slice_res.unwrap());
+            }
+        }
+    }
+
+    let env_uid = std.sys.env("UID").unwrap_or("");
+    if (env_uid == "") == false {
+        uid_str = env_uid;
+    }
+
+    return |>
+        path: bus_path,
+        uid: uid_str
+    <|;
+};
+
+let is_boolean_prop = fun(name) {
+    return name == "CanPlay" || name == "CanPause" || name == "CanSeek" || name == "CanControl" || name == "CanGoNext" || name == "CanGoPrevious" || name == "CanQuit";
+};
+
+let dbus_info = get_dbus_socket_and_uid();
+let sock_res = std.net.unix_connect(dbus_info.path);
+
+if sock_res.is_err() {
+    log("MPRIS plugin failed to connect to D-Bus at: ".join(dbus_info.path));
+    return |>
+        error_type: "Plugin",
+        message: "Failed to connect to D-Bus at ".join(dbus_info.path)
+    <|;
+}
+
+let sock = sock_res.unwrap();
+
+"Perform SASL EXTERNAL Authentication"
+let auth_bytes = __bytes_new(0).unwrap();
+__bytes_push(auth_bytes, 0);
+let hex_uid = to_hex_ascii(dbus_info.uid);
+__bytes_extend(auth_bytes, __bytes_from_string("AUTH EXTERNAL ".join(hex_uid).join("\r\n")));
+__net_write(sock, auth_bytes);
+let auth_resp = __net_read(sock, 1024);
+__net_write(sock, "BEGIN\r\n");
+
+"Register with D-Bus via Hello()"
+let hello_msg = make_method_call(1, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello", 0, "");
+__net_write(sock, hello_msg);
+let h_res = __net_read(sock, 2048);
+
+"Acquire well-known service name: org.mpris.MediaPlayer2.amp"
+let req_body = __bytes_new(0).unwrap();
+append_str_val(req_body, "org.mpris.MediaPlayer2.amp");
+pad_bytes(req_body, 4);
+append_u32_le(req_body, 6); "DBUS_NAME_FLAG_REPLACE_EXISTING | DBUS_NAME_FLAG_DO_NOT_QUEUE"
+let req_msg = make_method_call(2, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName", req_body, "su");
+__net_write(sock, req_msg);
+let r_res = __net_read(sock, 2048);
+
+"Switch D-Bus socket to non-blocking mode for event polling"
+std.net.set_nonblocking(sock, true);
+log("MPRIS plugin initialized successfully (service: org.mpris.MediaPlayer2.amp)");
+
+"--- Global State Initialization ---"
+set_state("mpris_sock", sock);
+set_state("mpris_serial", 10);
+set_state("mpris_status", "Stopped");
+set_state("mpris_title", "");
+set_state("mpris_artist", "");
+set_state("mpris_album", "");
+set_state("mpris_duration_secs", 0);
+set_state("mpris_position_secs", 0);
+
+let emit_properties_changed = fun() {
+    let s = get_state("mpris_sock");
+    let next_serial = get_state("mpris_serial") + 1;
+    set_state("mpris_serial", next_serial);
+
+    let cur_status = get_state("mpris_status");
+    let cur_title = get_state("mpris_title");
+    let cur_artist = get_state("mpris_artist");
+    let cur_album = get_state("mpris_album");
+    let cur_dur = get_state("mpris_duration_secs");
+
+    let changed_entries = __bytes_new(0).unwrap();
+    append_dict_entry_str(changed_entries, "PlaybackStatus", cur_status);
+
+    let meta_dict = build_metadata_dict(
+        cur_title,
+        cur_artist,
+        cur_album,
+        cur_dur * 1000000
+    );
+    pad_bytes(changed_entries, 8);
+    append_str_val(changed_entries, "Metadata");
+    __bytes_push(changed_entries, 5);
+    __bytes_extend(changed_entries, __bytes_from_string("a{sv}"));
+    __bytes_push(changed_entries, 0);
+    pad_bytes(changed_entries, 4);
+    append_u32_le(changed_entries, __bytes_len(meta_dict));
+    pad_bytes(changed_entries, 8);
+    __bytes_extend(changed_entries, meta_dict);
+
+    let body = __bytes_new(0).unwrap();
+    append_str_val(body, "org.mpris.MediaPlayer2.Player");
+    pad_bytes(body, 4);
+    append_u32_le(body, __bytes_len(changed_entries));
+    pad_bytes(body, 8);
+    __bytes_extend(body, changed_entries);
+    pad_bytes(body, 4);
+    append_u32_le(body, 0); "empty invalidated_properties array"
+
+    let sig_msg = make_signal(
+        next_serial,
+        "/org/mpris/MediaPlayer2",
+        "org.freedesktop.DBus.Properties",
+        "PropertiesChanged",
+        body,
+        "sa{sv}as"
+    );
+    __net_write(s, sig_msg);
+    return 1;
+};
+
+let poll_dbus = fun() {
+    let s = get_state("mpris_sock");
+    for true {
+        let hdr_res = __net_read(s, 16);
+        if hdr_res.is_err() {
+            break;
+        }
+        let hdr = hdr_res.unwrap();
+        if __bytes_len(hdr) < 16 {
+            break;
+        }
+
+        let msg_type = hdr[1];
+        let body_len = hdr.get_u32_le(4).unwrap();
+        let serial = hdr.get_u32_le(8).unwrap();
+        let fields_len = hdr.get_u32_le(12).unwrap();
+
+        let total_hdr = 16 + fields_len;
+        let pad_len = (8 - (total_hdr % 8)) % 8;
+        let to_read_hdr = fields_len + pad_len;
+
+        let rest_hdr = __bytes_new(0).unwrap();
+        if to_read_hdr > 0 {
+            let rh_res = __net_read(s, to_read_hdr);
+            if rh_res.is_err() {
+                break;
+            }
+            rest_hdr = rh_res.unwrap();
+        }
+
+        let body = __bytes_new(0).unwrap();
+        if body_len > 0 {
+            let b_res = __net_read(s, body_len);
+            if b_res.is_err() {
+                break;
+            }
+            body = b_res.unwrap();
+        }
+
+        let full_msg = __bytes_new(0).unwrap();
+        __bytes_extend(full_msg, hdr);
+        __bytes_extend(full_msg, rest_hdr);
+        __bytes_extend(full_msg, body);
+
+        if msg_type == 1 { "METHOD_CALL"
+            let headers = parse_headers(full_msg);
+            let next_serial = get_state("mpris_serial") + 1;
+            set_state("mpris_serial", next_serial);
+
+            let cur_status = get_state("mpris_status");
+            let cur_title = get_state("mpris_title");
+            let cur_artist = get_state("mpris_artist");
+            let cur_album = get_state("mpris_album");
+            let cur_dur = get_state("mpris_duration_secs");
+            let cur_pos = get_state("mpris_position_secs");
+
+            if headers.member == "Introspect" {
+                let xml_str = build_introspection_xml();
+                let ret_body = __bytes_new(0).unwrap();
+                append_str_val(ret_body, xml_str);
+                let ret_msg = make_method_return(next_serial, serial, headers.sender, ret_body, "s");
+                __net_write(s, ret_msg);
+            } else {
+                if headers.member == "GetAll" {
+                    let msg_body = extract_body(full_msg);
+                    let p1 = parse_string_at(msg_body, 0);
+                    let target_iface = p1.val;
+
+                    if target_iface == "org.mpris.MediaPlayer2.Player" {
+                        let ret_body = build_player_properties(
+                            cur_status,
+                            cur_title,
+                            cur_artist,
+                            cur_album,
+                            cur_dur * 1000000,
+                            cur_pos * 1000000
+                        );
+                        let ret_msg = make_method_return(next_serial, serial, headers.sender, ret_body, "a{sv}");
+                        __net_write(s, ret_msg);
+                    } else {
+                        if target_iface == "org.mpris.MediaPlayer2" {
+                            let ret_body = build_mediaplayer2_properties();
+                            let ret_msg = make_method_return(next_serial, serial, headers.sender, ret_body, "a{sv}");
+                            __net_write(s, ret_msg);
+                        } else {
+                            let ret_body = __bytes_new(0).unwrap();
+                            append_u32_le(ret_body, 0);
+                            pad_bytes(ret_body, 8);
+                            let ret_msg = make_method_return(next_serial, serial, headers.sender, ret_body, "a{sv}");
+                            __net_write(s, ret_msg);
+                        }
+                    }
+                } else {
+                    if headers.member == "Get" {
+                        let msg_body = extract_body(full_msg);
+                        let p1 = parse_string_at(msg_body, 0);
+                        let target_iface = p1.val;
+                        let p2 = parse_string_at(msg_body, align_offset(p1.next_offset, 4));
+                        let prop_name = p2.val;
+
+                        if prop_name == "PlaybackStatus" {
+                            let ret_body = __bytes_new(0).unwrap();
+                            __bytes_push(ret_body, 1);
+                            __bytes_extend(ret_body, __bytes_from_string("s"));
+                            __bytes_push(ret_body, 0);
+                            pad_bytes(ret_body, 4);
+                            append_str_val(ret_body, cur_status);
+                            let ret_msg = make_method_return(next_serial, serial, headers.sender, ret_body, "v");
+                            __net_write(s, ret_msg);
+                        } else {
+                            if prop_name == "Identity" {
+                                let ret_body = __bytes_new(0).unwrap();
+                                __bytes_push(ret_body, 1);
+                                __bytes_extend(ret_body, __bytes_from_string("s"));
+                                __bytes_push(ret_body, 0);
+                                pad_bytes(ret_body, 4);
+                                append_str_val(ret_body, "amp");
+                                let ret_msg = make_method_return(next_serial, serial, headers.sender, ret_body, "v");
+                                __net_write(s, ret_msg);
+                            } else {
+                                if prop_name == "Metadata" {
+                                    let meta_dict = build_metadata_dict(
+                                        cur_title,
+                                        cur_artist,
+                                        cur_album,
+                                        cur_dur * 1000000
+                                    );
+                                    let ret_body = __bytes_new(0).unwrap();
+                                    __bytes_push(ret_body, 5);
+                                    __bytes_extend(ret_body, __bytes_from_string("a{sv}"));
+                                    __bytes_push(ret_body, 0);
+                                    pad_bytes(ret_body, 4);
+                                    append_u32_le(ret_body, __bytes_len(meta_dict));
+                                    pad_bytes(ret_body, 8);
+                                    __bytes_extend(ret_body, meta_dict);
+                                    let ret_msg = make_method_return(next_serial, serial, headers.sender, ret_body, "v");
+                                    __net_write(s, ret_msg);
+                                } else {
+                                    if prop_name == "Position" {
+                                        let ret_body = __bytes_new(0).unwrap();
+                                        __bytes_push(ret_body, 1);
+                                        __bytes_extend(ret_body, __bytes_from_string("x"));
+                                        __bytes_push(ret_body, 0);
+                                        pad_bytes(ret_body, 8);
+                                        append_u64_le(ret_body, cur_pos * 1000000);
+                                        let ret_msg = make_method_return(next_serial, serial, headers.sender, ret_body, "v");
+                                        __net_write(s, ret_msg);
+                                    } else {
+                                        if is_boolean_prop(prop_name) {
+                                            let ret_body = __bytes_new(0).unwrap();
+                                            __bytes_push(ret_body, 1);
+                                            __bytes_extend(ret_body, __bytes_from_string("b"));
+                                            __bytes_push(ret_body, 0);
+                                            pad_bytes(ret_body, 4);
+                                            append_u32_le(ret_body, 1);
+                                            let ret_msg = make_method_return(next_serial, serial, headers.sender, ret_body, "v");
+                                            __net_write(s, ret_msg);
+                                        } else {
+                                            let ret_body = __bytes_new(0).unwrap();
+                                            __bytes_push(ret_body, 1);
+                                            __bytes_extend(ret_body, __bytes_from_string("s"));
+                                            __bytes_push(ret_body, 0);
+                                            pad_bytes(ret_body, 4);
+                                            append_str_val(ret_body, "");
+                                            let ret_msg = make_method_return(next_serial, serial, headers.sender, ret_body, "v");
+                                            __net_write(s, ret_msg);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        if headers.member == "PlayPause" {
+                            player_toggle_pause();
+                            let new_status = "Playing";
+                            if cur_status == "Playing" {
+                                new_status = "Paused";
+                            }
+                            set_state("mpris_status", new_status);
+                            emit_properties_changed();
+                            let ret_msg = make_method_return(next_serial, serial, headers.sender, 0, "");
+                            __net_write(s, ret_msg);
+                        } else {
+                            if headers.member == "Play" {
+                                player_play();
+                                set_state("mpris_status", "Playing");
+                                emit_properties_changed();
+                                let ret_msg = make_method_return(next_serial, serial, headers.sender, 0, "");
+                                __net_write(s, ret_msg);
+                            } else {
+                                if headers.member == "Pause" {
+                                    player_pause();
+                                    set_state("mpris_status", "Paused");
+                                    emit_properties_changed();
+                                    let ret_msg = make_method_return(next_serial, serial, headers.sender, 0, "");
+                                    __net_write(s, ret_msg);
+                                } else {
+                                    if headers.member == "Stop" {
+                                        player_stop();
+                                        set_state("mpris_status", "Stopped");
+                                        emit_properties_changed();
+                                        let ret_msg = make_method_return(next_serial, serial, headers.sender, 0, "");
+                                        __net_write(s, ret_msg);
+                                    } else {
+                                        if headers.member == "Next" {
+                                            player_next();
+                                            let ret_msg = make_method_return(next_serial, serial, headers.sender, 0, "");
+                                            __net_write(s, ret_msg);
+                                        } else {
+                                            if headers.member == "Previous" {
+                                                player_previous();
+                                                let ret_msg = make_method_return(next_serial, serial, headers.sender, 0, "");
+                                                __net_write(s, ret_msg);
+                                            } else {
+                                                if headers.member == "Seek" {
+                                                    let msg_body = extract_body(full_msg);
+                                                    if __bytes_len(msg_body) >= 8 {
+                                                        let offset_us = msg_body.get_u64_le(0).unwrap();
+                                                        let offset_secs = offset_us / 1000000;
+                                                        let new_pos = cur_pos + offset_secs;
+                                                        if new_pos < 0 { new_pos = 0; }
+                                                        set_state("mpris_position_secs", new_pos);
+                                                        player_seek(new_pos);
+                                                    }
+                                                    let ret_msg = make_method_return(next_serial, serial, headers.sender, 0, "");
+                                                    __net_write(s, ret_msg);
+                                                } else {
+                                                    if headers.member == "SetPosition" {
+                                                        let msg_body = extract_body(full_msg);
+                                                        let p1 = parse_string_at(msg_body, 0);
+                                                        let pos_offset = align_offset(p1.next_offset, 8);
+                                                        if __bytes_len(msg_body) >= (pos_offset + 8) {
+                                                            let pos_us = msg_body.get_u64_le(pos_offset).unwrap();
+                                                            let new_pos = pos_us / 1000000;
+                                                            set_state("mpris_position_secs", new_pos);
+                                                            player_seek(new_pos);
+                                                        }
+                                                        let ret_msg = make_method_return(next_serial, serial, headers.sender, 0, "");
+                                                        __net_write(s, ret_msg);
+                                                    } else {
+                                                        if headers.member == "Quit" {
+                                                            player_stop();
+                                                            let ret_msg = make_method_return(next_serial, serial, headers.sender, 0, "");
+                                                            __net_write(s, ret_msg);
+                                                        } else {
+                                                            let ret_msg = make_method_return(next_serial, serial, headers.sender, 0, "");
+                                                            __net_write(s, ret_msg);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 1;
+};
+
+"--- AMP Plugin Interface ---"
+
+return |>
+    on_playback_update: fun(info) {
+        let changed = false;
+        let new_status = "Playing";
+        if info.is_paused {
+            new_status = "Paused";
+        }
+        let cur_status = get_state("mpris_status");
+        if (cur_status == new_status) == false {
+            set_state("mpris_status", new_status);
+            changed = true;
+        }
+
+        let new_title = to_string(info.title);
+        let cur_title = get_state("mpris_title");
+        if (cur_title == new_title) == false {
+            set_state("mpris_title", new_title);
+            changed = true;
+        }
+
+        let new_artist = to_string(info.artist);
+        let cur_artist = get_state("mpris_artist");
+        if (cur_artist == new_artist) == false {
+            set_state("mpris_artist", new_artist);
+            changed = true;
+        }
+
+        let new_album = to_string(info.series_name);
+        let cur_album = get_state("mpris_album");
+        if (cur_album == new_album) == false {
+            set_state("mpris_album", new_album);
+            changed = true;
+        }
+
+        set_state("mpris_duration_secs", info.duration_secs);
+        set_state("mpris_position_secs", info.position_secs);
+
+        if changed {
+            emit_properties_changed();
+        }
+
+        poll_dbus();
+    },
+
+    on_playback_stop: fun() {
+        let cur_status = get_state("mpris_status");
+        if (cur_status == "Stopped") == false {
+            set_state("mpris_status", "Stopped");
+            emit_properties_changed();
+        }
+        poll_dbus();
+    },
+
+    on_time_update: fun(time_ms) {
+        set_state("mpris_position_secs", time_ms / 1000);
+        poll_dbus();
+    },
+
+    on_state_changed: fun(state) {
+        let new_status = "Playing";
+        if state == 0 {
+            new_status = "Paused";
+        } else {
+            if state == 3 {
+                new_status = "Stopped";
+            }
+        }
+        let cur_status = get_state("mpris_status");
+        if (cur_status == new_status) == false {
+            set_state("mpris_status", new_status);
+            emit_properties_changed();
+        }
+        poll_dbus();
+    },
+
+    on_play: fun() {
+        let cur_status = get_state("mpris_status");
+        if (cur_status == "Playing") == false {
+            set_state("mpris_status", "Playing");
+            emit_properties_changed();
+        }
+        poll_dbus();
+    },
+
+    on_pause: fun() {
+        let cur_status = get_state("mpris_status");
+        if (cur_status == "Paused") == false {
+            set_state("mpris_status", "Paused");
+            emit_properties_changed();
+        }
+        poll_dbus();
+    },
+
+    on_stop: fun() {
+        let cur_status = get_state("mpris_status");
+        if (cur_status == "Stopped") == false {
+            set_state("mpris_status", "Stopped");
+            emit_properties_changed();
+        }
+        poll_dbus();
+    },
+
+    on_tick: fun() {
+        poll_dbus();
+    }
+<|;
